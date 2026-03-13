@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 logs/*.log
 data/monitor.db
+
+# Local runtime config with credentials
+config/ftp_monitor.local.ini

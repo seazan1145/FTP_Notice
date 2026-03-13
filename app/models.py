@@ -31,7 +31,6 @@ class FtpConnectionConfig:
     exclude_extensions: list[str] = field(default_factory=list)
     exclude_name_contains: list[str] = field(default_factory=list)
     encoding: str = "utf-8"
-    poll_seconds_override: Optional[int] = None
 
 
 @dataclass(slots=True)
