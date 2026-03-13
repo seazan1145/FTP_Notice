@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ftplib
 import socket
+import ssl
 from collections.abc import Iterable
 
 from .models import FtpConnectionConfig, GeneralConfig, RemoteFileInfo
@@ -58,7 +59,7 @@ class FtpClient:
     def _walk_recursive(self, root_dir: str, current_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
         try:
-            entries = list(self.ftp.mlsd(current_dir))
+            entries = list(self._mlsd_with_fallback(current_dir))
             for name, facts in entries:
                 if name in {".", ".."}:
                     continue
@@ -77,7 +78,7 @@ class FtpClient:
                         modified_at=facts.get("modify"),
                     )
             return
-        except (ftplib.error_perm, AttributeError):
+        except (ftplib.error_perm, AttributeError, ssl.SSLError, OSError):
             pass
 
         for row in self._list_via_list(current_dir):
@@ -97,7 +98,7 @@ class FtpClient:
     def _list_single_dir(self, root_dir: str, target_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
         try:
-            for name, facts in self.ftp.mlsd(target_dir):
+            for name, facts in self._mlsd_with_fallback(target_dir):
                 if facts.get("type") != "file":
                     continue
                 path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
@@ -110,7 +111,7 @@ class FtpClient:
                     modified_at=facts.get("modify"),
                 )
             return
-        except (ftplib.error_perm, AttributeError):
+        except (ftplib.error_perm, AttributeError, ssl.SSLError, OSError):
             pass
 
         for row in self._list_via_list(target_dir):
@@ -144,6 +145,15 @@ class FtpClient:
             name = parts[8]
             rows.append((name, size, is_dir))
         return rows
+
+    def _mlsd_with_fallback(self, target_dir: str):
+        assert self.ftp is not None
+        try:
+            yield from self.ftp.mlsd(target_dir)
+        except ssl.SSLEOFError:
+            # Some FTPS servers unexpectedly close the data-channel TLS session
+            # when MLSD finishes. Treat it as unsupported and fallback to LIST.
+            return
 
 
 class _ImplicitFTP_TLS(ftplib.FTP_TLS):
