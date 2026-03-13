@@ -60,11 +60,11 @@ run_monitor.bat
 ## よくあるエラー
 - 認証失敗: `host / port / username / password` を再確認
 - 文字化け: `encoding` を `cp932` などに変更
-- FTPS失敗: `protocol=ftps`, `port=990` とサーバー設定の整合性を確認
+- FTPS失敗: `protocol=ftps` は 990 番ポート時に implicit FTPS として接続します。サーバー設定と `port` の整合性を確認
 
 ## FTP / FTPS の違い
 - `ftp`: 平文通信
-- `ftps`: TLS で暗号化通信（`ftplib.FTP_TLS` を利用）
+- `ftps`: TLS で暗号化通信（`ftplib.FTP_TLS` を利用。`port=990` は implicit FTPS として自動接続）
 
 ## セキュリティ注意（パスワード平文保存）
 INI は平文でパスワードを保持します。アクセス権を厳格に管理してください。将来的な改善候補:

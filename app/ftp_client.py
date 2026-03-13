@@ -14,8 +14,9 @@ class FtpClient:
         self.ftp: ftplib.FTP | ftplib.FTP_TLS | None = None
 
     def connect(self) -> None:
-        socket.setdefaulttimeout(self.general.read_timeout)
-        if self.config.protocol == "ftps":
+        if self._use_implicit_ftps():
+            ftp = _ImplicitFTP_TLS(timeout=self.general.connect_timeout)
+        elif self.config.protocol == "ftps":
             ftp = ftplib.FTP_TLS(timeout=self.general.connect_timeout)
         else:
             ftp = ftplib.FTP(timeout=self.general.connect_timeout)
@@ -24,10 +25,17 @@ class FtpClient:
         ftp.login(self.config.username, self.config.password)
         ftp.set_pasv(self.general.passive_mode)
         ftp.encoding = self.config.encoding
+        ftp.timeout = self.general.read_timeout
 
         if isinstance(ftp, ftplib.FTP_TLS):
             ftp.prot_p()
         self.ftp = ftp
+
+    def _use_implicit_ftps(self) -> bool:
+        protocol = self.config.protocol.lower()
+        if protocol in {"ftps-implicit", "ftpsi", "implicit-ftps"}:
+            return True
+        return protocol == "ftps" and self.config.port == 990
 
     def disconnect(self) -> None:
         if self.ftp is None:
@@ -136,3 +144,26 @@ class FtpClient:
             name = parts[8]
             rows.append((name, size, is_dir))
         return rows
+
+
+class _ImplicitFTP_TLS(ftplib.FTP_TLS):
+    """FTP over SSL/TLS from the first packet (implicit FTPS)."""
+
+    def connect(self, host: str = "", port: int = 0, timeout: float = -999, source_address=None):
+        if host:
+            self.host = host
+        if port > 0:
+            self.port = port
+        if timeout != -999:
+            self.timeout = timeout
+
+        self.sock = socket.create_connection(
+            (self.host, self.port),
+            self.timeout,
+            source_address=source_address,
+        )
+        self.af = self.sock.family
+        self.sock = self.context.wrap_socket(self.sock, server_hostname=self.host)
+        self.file = self.sock.makefile("r", encoding=self.encoding)
+        self.welcome = self.getresp()
+        return self.welcome
