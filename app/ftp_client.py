@@ -31,6 +31,10 @@ _WINDOWS_LIST_PATTERN = re.compile(
 )
 
 
+class FtpDataConnectionTlsError(RuntimeError):
+    """Raised when FTPS data channel TLS/session negotiation fails."""
+
+
 class FtpClient:
     def __init__(self, config: FtpConnectionConfig, general: GeneralConfig, logger: logging.Logger | None = None) -> None:
         self.config = config
@@ -39,28 +43,31 @@ class FtpClient:
         self.ftp: ftplib.FTP | ftplib.FTP_TLS | None = None
 
     def connect(self) -> None:
-        if self._use_implicit_ftps():
+        mode = self._connection_mode()
+        if mode == "ftps-implicit":
             ftp = _ImplicitFTP_TLS(timeout=self.general.connect_timeout)
-        elif self.config.protocol == "ftps":
-            ftp = ftplib.FTP_TLS(timeout=self.general.connect_timeout)
+        elif mode == "ftps-explicit":
+            ftp = _ExplicitFTP_TLS(timeout=self.general.connect_timeout)
         else:
             ftp = ftplib.FTP(timeout=self.general.connect_timeout)
 
+        self.logger.debug("Connecting with mode=%s host=%s port=%s", mode, self.config.host, self.config.port)
         ftp.connect(self.config.host, self.config.port)
         ftp.login(self.config.username, self.config.password)
         ftp.set_pasv(self.general.passive_mode)
         ftp.encoding = self.config.encoding
         ftp.timeout = self.general.read_timeout
 
+        self.logger.debug("Connection established: mode=%s passive_mode=%s", mode, self.general.passive_mode)
         if isinstance(ftp, ftplib.FTP_TLS):
             ftp.prot_p()
+            self.logger.debug("prot_p() executed for mode=%s", mode)
+        else:
+            self.logger.debug("prot_p() skipped for mode=%s", mode)
         self.ftp = ftp
 
-    def _use_implicit_ftps(self) -> bool:
-        protocol = self.config.protocol.lower()
-        if protocol in {"ftps-implicit", "ftpsi", "implicit-ftps"}:
-            return True
-        return protocol == "ftps" and self.config.port == 990
+    def _connection_mode(self) -> str:
+        return self.config.protocol.lower().strip()
 
     def disconnect(self) -> None:
         if self.ftp is None:
@@ -82,7 +89,7 @@ class FtpClient:
 
     def _walk_recursive(self, root_dir: str, current_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
-        success, entries = self._try_mlsd(current_dir)
+        success, entries, mlsd_tls_issue = self._try_mlsd(current_dir)
         if success:
             self.logger.debug("MLSD succeeded: dir=%s entries=%s", current_dir, len(entries))
             for name, facts in entries:
@@ -108,23 +115,33 @@ class FtpClient:
             return
 
         self.logger.warning("MLSD failed for %s. Falling back to LIST.", current_dir)
-        for row in self._list_via_list(current_dir):
-            name, size, is_dir = row
-            path = f"{current_dir.rstrip('/')}/{name}" if current_dir != "/" else f"/{name}"
-            if is_dir:
-                yield from self._walk_recursive(root_dir, path)
-            else:
-                yield RemoteFileInfo(
-                    connection_name=self.config.display_name,
-                    remote_dir=root_dir,
-                    remote_path=path,
-                    file_name=name,
-                    file_size=size,
+        if mlsd_tls_issue:
+            self.logger.warning("MLSD failed due to FTPS data-channel TLS/session error: dir=%s", current_dir)
+        try:
+            for row in self._list_via_list(current_dir):
+                name, size, is_dir = row
+                path = f"{current_dir.rstrip('/')}/{name}" if current_dir != "/" else f"/{name}"
+                if is_dir:
+                    yield from self._walk_recursive(root_dir, path)
+                else:
+                    yield RemoteFileInfo(
+                        connection_name=self.config.display_name,
+                        remote_dir=root_dir,
+                        remote_path=path,
+                        file_name=name,
+                        file_size=size,
+                    )
+        except FtpDataConnectionTlsError:
+            if mlsd_tls_issue:
+                self.logger.error(
+                    "MLSD and LIST both failed. FTPS data connection issue is likely (not a LIST parse problem): dir=%s",
+                    current_dir,
                 )
+            raise
 
     def _list_single_dir(self, root_dir: str, target_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
-        success, entries = self._try_mlsd(target_dir)
+        success, entries, mlsd_tls_issue = self._try_mlsd(target_dir)
         if success:
             self.logger.debug("MLSD succeeded: dir=%s entries=%s", target_dir, len(entries))
             for name, facts in entries:
@@ -143,24 +160,44 @@ class FtpClient:
             return
 
         self.logger.warning("MLSD failed for %s. Falling back to LIST.", target_dir)
-        for row in self._list_via_list(target_dir):
-            name, size, is_dir = row
-            if is_dir:
-                self.logger.debug("Skipping LIST directory entry in single-dir mode: %s/%s", target_dir, name)
-                continue
-            path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
-            yield RemoteFileInfo(
-                connection_name=self.config.display_name,
-                remote_dir=root_dir,
-                remote_path=path,
-                file_name=name,
-                file_size=size,
-            )
+        if mlsd_tls_issue:
+            self.logger.warning("MLSD failed due to FTPS data-channel TLS/session error: dir=%s", target_dir)
+        try:
+            for row in self._list_via_list(target_dir):
+                name, size, is_dir = row
+                if is_dir:
+                    self.logger.debug("Skipping LIST directory entry in single-dir mode: %s/%s", target_dir, name)
+                    continue
+                path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
+                yield RemoteFileInfo(
+                    connection_name=self.config.display_name,
+                    remote_dir=root_dir,
+                    remote_path=path,
+                    file_name=name,
+                    file_size=size,
+                )
+        except FtpDataConnectionTlsError:
+            if mlsd_tls_issue:
+                self.logger.error(
+                    "MLSD and LIST both failed. FTPS data connection issue is likely (not a LIST parse problem): dir=%s",
+                    target_dir,
+                )
+            raise
 
     def _list_via_list(self, target_dir: str) -> list[tuple[str, int, bool]]:
         assert self.ftp is not None
         lines: list[str] = []
-        self.ftp.retrlines(f"LIST {target_dir}", lines.append)
+        self.logger.debug("LIST start: dir=%s", target_dir)
+        try:
+            self.ftp.retrlines(f"LIST {target_dir}", lines.append)
+        except Exception as exc:
+            self._log_data_connection_error("LIST", target_dir, exc)
+            if self._is_ftps_data_tls_issue(exc):
+                self.logger.error("Server may require TLS session reuse on data connections: dir=%s", target_dir)
+                raise FtpDataConnectionTlsError(str(exc)) from exc
+            raise
+        self.logger.debug("LIST end: dir=%s lines=%s", target_dir, len(lines))
+
         rows: list[tuple[str, int, bool]] = []
         for line in lines:
             parsed = self._parse_list_line(line)
@@ -190,17 +227,82 @@ class FtpClient:
 
         return None
 
-    def _try_mlsd(self, target_dir: str) -> tuple[bool, list[tuple[str, dict[str, str]]]]:
+    def _try_mlsd(self, target_dir: str) -> tuple[bool, list[tuple[str, dict[str, str]]], bool]:
         assert self.ftp is not None
+        self.logger.debug("MLSD start: dir=%s", target_dir)
         try:
             entries = list(self.ftp.mlsd(target_dir))
-            return (True, entries)
-        except (ssl.SSLEOFError, ftplib.error_perm, AttributeError, OSError) as exc:
-            self.logger.info("MLSD unavailable for %s: %s", target_dir, exc)
-            return (False, [])
+            self.logger.debug("MLSD end: dir=%s entries=%s", target_dir, len(entries))
+            return (True, entries, False)
+        except Exception as exc:
+            self._log_data_connection_error("MLSD", target_dir, exc)
+            return (False, [], self._is_ftps_data_tls_issue(exc))
+
+    def _is_ftps_data_tls_issue(self, exc: Exception) -> bool:
+        if isinstance(exc, ssl.SSLEOFError):
+            return True
+        if isinstance(exc, ftplib.error_temp):
+            text = str(exc).lower()
+            return "tls session of data connection not resumed" in text or ("425" in text and "not resumed" in text)
+        return False
+
+    def _log_data_connection_error(self, op: str, target_dir: str, exc: Exception) -> None:
+        if isinstance(exc, ssl.SSLEOFError):
+            self.logger.warning("%s failed due to FTPS data-channel TLS/session error: dir=%s error=%s", op, target_dir, exc)
+            return
+        if isinstance(exc, ftplib.error_temp) and self._is_ftps_data_tls_issue(exc):
+            self.logger.warning(
+                "%s failed due to FTPS data-channel TLS/session reuse requirement: dir=%s error=%s",
+                op,
+                target_dir,
+                exc,
+            )
+            return
+        if isinstance(exc, ftplib.error_perm):
+            self.logger.info("%s unavailable due to permission/server response: dir=%s error=%s", op, target_dir, exc)
+            return
+        if isinstance(exc, OSError):
+            self.logger.info("%s failed due to network/system OSError: dir=%s error=%s", op, target_dir, exc)
+            return
+        self.logger.info("%s unavailable for %s: %s", op, target_dir, exc)
 
 
-class _ImplicitFTP_TLS(ftplib.FTP_TLS):
+class _BaseReusableTLSFTP(ftplib.FTP_TLS):
+    """FTP_TLS that attempts TLS session reuse for data-channel sockets."""
+
+    def ntransfercmd(self, cmd, rest=None):
+        conn, size = ftplib.FTP.ntransfercmd(self, cmd, rest)
+        if not self._prot_p:
+            return conn, size
+
+        logger = logging.getLogger("ftp_monitor")
+        host = getattr(self, "host", None)
+        session = getattr(self.sock, "session", None)
+
+        if session is not None:
+            try:
+                conn = self.context.wrap_socket(conn, server_hostname=host, session=session)
+                logger.debug("FTPS data connection wrapped with TLS session reuse.")
+                return conn, size
+            except TypeError:
+                logger.debug("TLS session kwarg unsupported; falling back to normal data-channel wrap.")
+            except Exception as exc:
+                logger.warning("FTPS data-channel wrap with session reuse failed; retrying without session: %s", exc)
+
+        try:
+            conn = self.context.wrap_socket(conn, server_hostname=host)
+            logger.debug("FTPS data connection wrapped without session reuse.")
+            return conn, size
+        except Exception as exc:
+            logger.exception("Failed to establish FTPS data connection TLS wrap.")
+            raise FtpDataConnectionTlsError("FTPS data connection TLS wrap failed") from exc
+
+
+class _ExplicitFTP_TLS(_BaseReusableTLSFTP):
+    """Explicit FTPS with data-channel TLS session reuse support."""
+
+
+class _ImplicitFTP_TLS(_BaseReusableTLSFTP):
     """FTP over SSL/TLS from the first packet (implicit FTPS)."""
 
     def connect(self, host: str = "", port: int = 0, timeout: float = -999, source_address=None):

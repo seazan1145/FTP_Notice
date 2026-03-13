@@ -7,8 +7,26 @@ from .models import AppConfig, FtpConnectionConfig, GeneralConfig
 from .utils import parse_bool, parse_csv
 
 
-DEFAULT_CONFIG_PATH = Path("config/ftp_monitor.ini")
-ALLOWED_PROTOCOLS = {"ftp", "ftps", "ftps-implicit", "ftpsi", "implicit-ftps"}
+DEFAULT_CONFIG_PATH = Path("config/ftp_monitor.sample.ini")
+ALLOWED_PROTOCOLS = {"ftp", "ftps-explicit", "ftps-implicit"}
+PROTOCOL_ALIASES = {
+    "ftp": "ftp",
+    "ftps": "ftps-explicit",
+    "ftps-explicit": "ftps-explicit",
+    "ftps-implicit": "ftps-implicit",
+    "ftpsi": "ftps-implicit",
+    "implicit-ftps": "ftps-implicit",
+}
+
+
+def normalize_protocol(raw_protocol: str) -> str:
+    protocol = raw_protocol.lower().strip()
+    normalized = PROTOCOL_ALIASES.get(protocol)
+    if normalized is None:
+        raise ValueError(
+            f"Invalid protocol: '{raw_protocol}'. Allowed values: {', '.join(sorted(ALLOWED_PROTOCOLS))}"
+        )
+    return normalized
 
 
 def load_config(config_path: Path = DEFAULT_CONFIG_PATH, root_dir: Path | None = None) -> AppConfig:
@@ -58,11 +76,12 @@ def _load_connections(parser: configparser.ConfigParser) -> list[FtpConnectionCo
         if not host or not username:
             raise ValueError(f"Invalid {section_name}: host and username are required")
 
-        protocol = section.get("protocol", "ftp").lower().strip()
-        if protocol not in ALLOWED_PROTOCOLS:
+        try:
+            protocol = normalize_protocol(section.get("protocol", "ftp"))
+        except ValueError as exc:
             raise ValueError(
-                f"Invalid {section_name}.protocol: '{protocol}'. Allowed values: {', '.join(sorted(ALLOWED_PROTOCOLS))}"
-            )
+                f"Invalid {section_name}.protocol: {exc}"
+            ) from exc
 
         remote_dirs = parse_csv(section.get("remote_dirs", ""))
         if not remote_dirs:

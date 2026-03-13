@@ -9,6 +9,7 @@ class WindowsNotifier:
         self._toaster = None
         self.backend_name = "logged-only"
         self.available = False
+        self.required_package = "win10toast"
         try:
             from win10toast import ToastNotifier  # type: ignore
 
@@ -17,12 +18,14 @@ class WindowsNotifier:
             self.available = True
             self.logger.info("Notification backend initialized: %s", self.backend_name)
         except Exception:
-            self.logger.warning("Notification backend unavailable: win10toast not installed or failed to initialize.")
+            self.logger.warning("Notification backend unavailable: failed to initialize '%s'.", self.required_package)
+            self.logger.warning("Install dependency to enable notifications: pip install %s", self.required_package)
             self.logger.warning("Notification backend initialized: %s", self.backend_name)
 
     def send_windows_notification(self, title: str, message: str) -> bool:
         if self._toaster is None:
             self.logger.error("Notification not sent (backend=%s): %s | %s", self.backend_name, title, message)
+            self.logger.error("Notification dependency missing. Install package: %s", self.required_package)
             return False
         try:
             self._toaster.show_toast(title, message, duration=8, threaded=True)

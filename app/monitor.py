@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from .db import MonitorDatabase
-from .ftp_client import FtpClient
+from .ftp_client import FtpClient, FtpDataConnectionTlsError
 from .models import AppConfig, FtpConnectionConfig, RemoteFileInfo
 from .notifier import WindowsNotifier
 
@@ -61,6 +61,8 @@ class MonitorService:
                             new_candidate_count += 1
                         if notified:
                             notified_count += 1
+                except FtpDataConnectionTlsError:
+                    self.logger.exception("Failed scanning directory due to FTPS data connection TLS/session issue: %s", remote_dir)
                 except Exception:
                     self.logger.exception("Failed scanning directory: %s", remote_dir)
         except Exception:
