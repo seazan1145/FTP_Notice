@@ -22,7 +22,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    config = load_config(args.config)
+    try:
+        config = load_config(args.config)
+    except Exception as exc:
+        print(f"Failed to load config: {exc}")
+        return 1
 
     ensure_dir(config.root_dir / "data")
     ensure_dir(config.root_dir / "logs")
@@ -36,10 +40,14 @@ def main() -> int:
     notifier = WindowsNotifier(logger)
 
     if args.test_notify:
-        notifier.send_windows_notification("FTP新着ファイル", "[Test]\n/test\nexample.txt")
-        logger.info("Test notification sent.")
+        ok = notifier.send_windows_notification("FTP新着ファイル", "[Test]\n/test\nexample.txt")
+        if ok:
+            logger.info("Test notification sent successfully.")
+            db.close()
+            return 0
+        logger.error("Test notification failed.")
         db.close()
-        return 0
+        return 1
 
     service = MonitorService(config, db, notifier, logger)
 

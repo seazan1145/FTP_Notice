@@ -25,11 +25,26 @@ class MonitorService:
     def run_once(self) -> None:
         enabled = [c for c in self.config.connections if c.enabled]
         self.logger.info("Config loaded: %s connection(s), %s enabled.", len(self.config.connections), len(enabled))
+        detected_count = 0
+        new_candidate_count = 0
+        notified_count = 0
         for connection in enabled:
-            self.process_connection(connection)
+            conn_detected, conn_new, conn_notified = self.process_connection(connection)
+            detected_count += conn_detected
+            new_candidate_count += conn_new
+            notified_count += conn_notified
+        self.logger.info(
+            "Scan summary: detected=%s new_candidates=%s notified=%s",
+            detected_count,
+            new_candidate_count,
+            notified_count,
+        )
 
-    def process_connection(self, connection: FtpConnectionConfig) -> None:
-        client = FtpClient(connection, self.config.general)
+    def process_connection(self, connection: FtpConnectionConfig) -> tuple[int, int, int]:
+        client = FtpClient(connection, self.config.general, logger=self.logger)
+        detected_count = 0
+        new_candidate_count = 0
+        notified_count = 0
         try:
             self.logger.info("Connecting: %s (%s:%s)", connection.display_name, connection.host, connection.port)
             client.connect()
@@ -38,18 +53,25 @@ class MonitorService:
                 self.logger.info("Scanning: %s", remote_dir)
                 try:
                     files = client.list_files(remote_dir, recursive=connection.recursive)
+                    self.logger.info("Directory scan result: dir=%s detected=%s", remote_dir, len(files))
                     for file_info in files:
-                        self.process_file(connection, file_info)
+                        detected_count += 1
+                        is_new, notified = self.process_file(connection, file_info)
+                        if is_new:
+                            new_candidate_count += 1
+                        if notified:
+                            notified_count += 1
                 except Exception:
                     self.logger.exception("Failed scanning directory: %s", remote_dir)
         except Exception:
             self.logger.exception("Connection failed: %s", connection.display_name)
         finally:
             client.disconnect()
+        return (detected_count, new_candidate_count, notified_count)
 
-    def process_file(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> None:
+    def process_file(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> tuple[bool, bool]:
         if not self._matches_filters(connection, file_info):
-            return
+            return (False, False)
 
         row = self.db.get_observed_file(connection.display_name, file_info.remote_path)
         if row is None:
@@ -63,43 +85,52 @@ class MonitorService:
                 }
             )
             self.logger.info("New candidate detected: %s size=%s", file_info.remote_path, file_info.file_size)
-            return
+            return (True, False)
 
         if int(row["is_notified"]) == 1:
-            return
+            self.logger.debug("Skipping already notified file: %s", file_info.remote_path)
+            return (False, False)
 
         old_size = int(row["file_size"] or 0)
         size_changed = old_size != file_info.file_size
         now = datetime.now(timezone.utc)
         last_change = _parse_iso(row["last_size_change_at"])
-        first_seen = _parse_iso(row["first_seen_at"])
-        stable_age = max((now - last_change).total_seconds(), (now - first_seen).total_seconds())
+
+        stable_age = (now - last_change).total_seconds()
         is_stable = (not size_changed) and stable_age >= self.config.general.stable_seconds
 
         self.db.update_seen(int(row["id"]), file_info.file_size, size_changed=size_changed, is_stable=is_stable)
 
         if size_changed:
             self.logger.info("Size changed: %s old=%s new=%s", file_info.remote_path, old_size, file_info.file_size)
-            return
+            return (False, False)
 
         if is_stable:
             message = f"[{connection.display_name}]\n{file_info.remote_dir}\n{file_info.file_name}"
             ok = self.notifier.send_windows_notification("FTP新着ファイル", message)
             if ok:
+                self.db.mark_notified(int(row["id"]))
                 self.logger.info("Notification sent: %s", file_info.remote_path)
-            else:
-                self.logger.warning("Notification fallback/logged: %s", file_info.remote_path)
-            self.db.mark_notified(int(row["id"]))
+                return (False, True)
+
+            self.logger.error(
+                "Notification failed, keeping record as unnotified: %s",
+                file_info.remote_path,
+            )
+        return (False, False)
 
     def _matches_filters(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> bool:
         lower_name = file_info.file_name.lower()
         for token in connection.exclude_name_contains:
             if token.lower() in lower_name:
+                self.logger.debug("Skipping file by exclude_name_contains: %s token=%s", file_info.remote_path, token)
                 return False
 
         ext = lower_name.rsplit(".", 1)[-1] if "." in lower_name else ""
         if connection.include_extensions and ext not in connection.include_extensions:
+            self.logger.debug("Skipping file by include_extensions: %s ext=%s", file_info.remote_path, ext)
             return False
         if connection.exclude_extensions and ext in connection.exclude_extensions:
+            self.logger.debug("Skipping file by exclude_extensions: %s ext=%s", file_info.remote_path, ext)
             return False
         return True

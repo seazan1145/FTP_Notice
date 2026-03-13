@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ftplib
+import logging
+import re
 import socket
 import ssl
 from collections.abc import Iterable
@@ -8,10 +10,32 @@ from collections.abc import Iterable
 from .models import FtpConnectionConfig, GeneralConfig, RemoteFileInfo
 
 
+_UNIX_LIST_PATTERN = re.compile(
+    r"^(?P<perms>[\-dlpscbD][rwxStTs\-]{9})\s+"
+    r"(?P<links>\d+)\s+"
+    r"(?P<owner>\S+)\s+"
+    r"(?P<group>\S+)\s+"
+    r"(?P<size>\d+)\s+"
+    r"(?P<month>[A-Za-z]{3})\s+"
+    r"(?P<day>\d{1,2})\s+"
+    r"(?P<time_year>\d{2}:\d{2}|\d{4})\s+"
+    r"(?P<name>.+)$"
+)
+
+_WINDOWS_LIST_PATTERN = re.compile(
+    r"^(?P<date>\d{2}-\d{2}-\d{2,4})\s+"
+    r"(?P<time>\d{2}:\d{2}(?:AM|PM))\s+"
+    r"(?P<size_or_dir><DIR>|\d+)\s+"
+    r"(?P<name>.+)$",
+    re.IGNORECASE,
+)
+
+
 class FtpClient:
-    def __init__(self, config: FtpConnectionConfig, general: GeneralConfig) -> None:
+    def __init__(self, config: FtpConnectionConfig, general: GeneralConfig, logger: logging.Logger | None = None) -> None:
         self.config = config
         self.general = general
+        self.logger = logger or logging.getLogger(__name__)
         self.ftp: ftplib.FTP | ftplib.FTP_TLS | None = None
 
     def connect(self) -> None:
@@ -58,10 +82,12 @@ class FtpClient:
 
     def _walk_recursive(self, root_dir: str, current_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
-        try:
-            entries = list(self._mlsd_with_fallback(current_dir))
+        success, entries = self._try_mlsd(current_dir)
+        if success:
+            self.logger.debug("MLSD succeeded: dir=%s entries=%s", current_dir, len(entries))
             for name, facts in entries:
                 if name in {".", ".."}:
+                    self.logger.debug("Skipping special entry: %s/%s", current_dir, name)
                     continue
                 item_type = facts.get("type", "")
                 path = f"{current_dir.rstrip('/')}/{name}" if current_dir != "/" else f"/{name}"
@@ -77,10 +103,11 @@ class FtpClient:
                         file_size=size,
                         modified_at=facts.get("modify"),
                     )
+                else:
+                    self.logger.debug("Skipping MLSD entry with unsupported type: path=%s type=%s", path, item_type)
             return
-        except (ftplib.error_perm, AttributeError, ssl.SSLError, OSError):
-            pass
 
+        self.logger.warning("MLSD failed for %s. Falling back to LIST.", current_dir)
         for row in self._list_via_list(current_dir):
             name, size, is_dir = row
             path = f"{current_dir.rstrip('/')}/{name}" if current_dir != "/" else f"/{name}"
@@ -97,9 +124,12 @@ class FtpClient:
 
     def _list_single_dir(self, root_dir: str, target_dir: str) -> Iterable[RemoteFileInfo]:
         assert self.ftp is not None
-        try:
-            for name, facts in self._mlsd_with_fallback(target_dir):
+        success, entries = self._try_mlsd(target_dir)
+        if success:
+            self.logger.debug("MLSD succeeded: dir=%s entries=%s", target_dir, len(entries))
+            for name, facts in entries:
                 if facts.get("type") != "file":
+                    self.logger.debug("Skipping MLSD non-file entry: dir=%s name=%s type=%s", target_dir, name, facts.get("type"))
                     continue
                 path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
                 yield RemoteFileInfo(
@@ -111,12 +141,12 @@ class FtpClient:
                     modified_at=facts.get("modify"),
                 )
             return
-        except (ftplib.error_perm, AttributeError, ssl.SSLError, OSError):
-            pass
 
+        self.logger.warning("MLSD failed for %s. Falling back to LIST.", target_dir)
         for row in self._list_via_list(target_dir):
             name, size, is_dir = row
             if is_dir:
+                self.logger.debug("Skipping LIST directory entry in single-dir mode: %s/%s", target_dir, name)
                 continue
             path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
             yield RemoteFileInfo(
@@ -133,27 +163,41 @@ class FtpClient:
         self.ftp.retrlines(f"LIST {target_dir}", lines.append)
         rows: list[tuple[str, int, bool]] = []
         for line in lines:
-            parts = line.split(maxsplit=8)
-            if len(parts) < 9:
+            parsed = self._parse_list_line(line)
+            if parsed is None:
+                self.logger.warning("Skipping unparsable LIST line: %s", line)
                 continue
-            perms = parts[0]
-            is_dir = perms.startswith("d")
-            try:
-                size = int(parts[4])
-            except ValueError:
-                size = 0
-            name = parts[8]
-            rows.append((name, size, is_dir))
+            rows.append(parsed)
+        self.logger.info("LIST completed: dir=%s entries=%s", target_dir, len(rows))
         return rows
 
-    def _mlsd_with_fallback(self, target_dir: str):
+    def _parse_list_line(self, line: str) -> tuple[str, int, bool] | None:
+        unix = _UNIX_LIST_PATTERN.match(line)
+        if unix:
+            perms = unix.group("perms")
+            is_dir = perms.startswith("d")
+            size = int(unix.group("size"))
+            name = unix.group("name")
+            return (name, size, is_dir)
+
+        windows = _WINDOWS_LIST_PATTERN.match(line)
+        if windows:
+            raw = windows.group("size_or_dir")
+            is_dir = raw.upper() == "<DIR>"
+            size = 0 if is_dir else int(raw)
+            name = windows.group("name")
+            return (name, size, is_dir)
+
+        return None
+
+    def _try_mlsd(self, target_dir: str) -> tuple[bool, list[tuple[str, dict[str, str]]]]:
         assert self.ftp is not None
         try:
-            yield from self.ftp.mlsd(target_dir)
-        except ssl.SSLEOFError:
-            # Some FTPS servers unexpectedly close the data-channel TLS session
-            # when MLSD finishes. Treat it as unsupported and fallback to LIST.
-            return
+            entries = list(self.ftp.mlsd(target_dir))
+            return (True, entries)
+        except (ssl.SSLEOFError, ftplib.error_perm, AttributeError, OSError) as exc:
+            self.logger.info("MLSD unavailable for %s: %s", target_dir, exc)
+            return (False, [])
 
 
 class _ImplicitFTP_TLS(ftplib.FTP_TLS):
