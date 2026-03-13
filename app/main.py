@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to INI config")
     parser.add_argument("--once", action="store_true", help="Run one scan cycle and exit")
     parser.add_argument("--test-notify", action="store_true", help="Send a test notification and exit")
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging for one-shot FTPS diagnostics")
     return parser.parse_args()
 
 
@@ -31,8 +32,11 @@ def main() -> int:
     ensure_dir(config.root_dir / "data")
     ensure_dir(config.root_dir / "logs")
 
-    logger = setup_logger(config.root_dir / "logs", config.general.log_level)
+    log_level = "DEBUG" if args.debug else config.general.log_level
+    logger = setup_logger(config.root_dir / "logs", log_level)
     logger.info("Application started.")
+    if args.debug:
+        logger.debug("Debug mode enabled (--debug).")
 
     db = MonitorDatabase(config.db_path)
     db.initialize()
@@ -45,7 +49,7 @@ def main() -> int:
             logger.info("Test notification sent successfully.")
             db.close()
             return 0
-        logger.error("Test notification failed.")
+        logger.error("Test notification failed. Ensure notification dependency is installed and backend is available.")
         db.close()
         return 1
 
