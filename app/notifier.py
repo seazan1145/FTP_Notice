@@ -20,6 +20,7 @@ class WindowsNotifier:
         except Exception:
             self.logger.warning("Notification backend unavailable: failed to initialize '%s'.", self.required_package)
             self.logger.warning("Install dependency to enable notifications: pip install %s", self.required_package)
+            self.logger.warning("Notifications will NOT be displayed until the package is installed.")
             self.logger.warning("Notification backend initialized: %s", self.backend_name)
 
     def send_windows_notification(self, title: str, message: str) -> bool:

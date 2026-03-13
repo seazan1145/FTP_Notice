@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from datetime import datetime, timezone
 
 from .db import MonitorDatabase
@@ -65,6 +66,13 @@ class MonitorService:
                     self.logger.exception("Failed scanning directory due to FTPS data connection TLS/session issue: %s", remote_dir)
                 except Exception:
                     self.logger.exception("Failed scanning directory: %s", remote_dir)
+        except socket.gaierror as exc:
+            self.logger.error("Host name could not be resolved: %s", connection.host)
+            self.logger.error(
+                "This usually means the host is invalid, misspelled, or still set to the sample value."
+            )
+            self.logger.info("DNS/name resolution error detail: %s", exc)
+            self.logger.debug("Name resolution traceback", exc_info=True)
         except Exception:
             self.logger.exception("Connection failed: %s", connection.display_name)
         finally:

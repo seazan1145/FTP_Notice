@@ -34,6 +34,33 @@ remote_dirs = /in
         with self.assertRaises(ValueError):
             load_config(path)
 
+    def test_sample_values_are_warned_and_disabled(self):
+        path = self._write(
+            """
+[general]
+poll_seconds = 10
+stable_seconds = 30
+connect_timeout = 10
+read_timeout = 10
+
+[ftp_01]
+enabled = true
+display_name = Example FTPS
+host = ftp.example.com
+username = your_user
+password = your_password
+protocol = ftps-implicit
+remote_dirs = /in
+""".strip()
+        )
+
+        config = load_config(path)
+
+        self.assertEqual(len(config.connections), 1)
+        self.assertFalse(config.connections[0].enabled)
+        self.assertTrue(any("ftp.example.com" in message for message in config.warnings))
+        self.assertIn("Sample configuration detected. Skipping this connection.", config.warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

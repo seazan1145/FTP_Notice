@@ -39,6 +39,7 @@ class AppConfig:
     connections: list[FtpConnectionConfig]
     root_dir: Path
     db_path: Path
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

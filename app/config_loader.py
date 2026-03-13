@@ -7,8 +7,20 @@ from .models import AppConfig, FtpConnectionConfig, GeneralConfig
 from .utils import parse_bool, parse_csv
 
 
-DEFAULT_CONFIG_PATH = Path("config/ftp_monitor.sample.ini")
+DEFAULT_CONFIG_PATH = Path("config/ftp_monitor.ini")
+DEFAULT_SAMPLE_CONFIG_PATH = Path("config/ftp_monitor.sample.ini")
 ALLOWED_PROTOCOLS = {"ftp", "ftps-explicit", "ftps-implicit"}
+
+
+SAMPLE_VALUE_WARNINGS = {
+    "ftp.example.com": "sample host 'ftp.example.com'",
+    "example.com": "sample host 'example.com'",
+    "your_host": "sample host 'your_host'",
+    "your_user": "sample username 'your_user'",
+    "your_username": "sample username 'your_username'",
+    "your_password": "sample password 'your_password'",
+    "changeme": "sample password 'CHANGEME'",
+}
 PROTOCOL_ALIASES = {
     "ftp": "ftp",
     "ftps": "ftps-explicit",
@@ -36,11 +48,11 @@ def load_config(config_path: Path = DEFAULT_CONFIG_PATH, root_dir: Path | None =
     parser.read(config_path, encoding="utf-8")
 
     general = _load_general(parser)
-    connections = _load_connections(parser)
+    connections, warnings = _load_connections(parser)
 
     base = root_dir or Path(__file__).resolve().parents[1]
     db_path = base / "data" / "monitor.db"
-    return AppConfig(general=general, connections=connections, root_dir=base, db_path=db_path)
+    return AppConfig(general=general, connections=connections, root_dir=base, db_path=db_path, warnings=warnings)
 
 
 def _parse_positive_int(raw: str, field_name: str, minimum: int = 1) -> int:
@@ -65,8 +77,9 @@ def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
     )
 
 
-def _load_connections(parser: configparser.ConfigParser) -> list[FtpConnectionConfig]:
+def _load_connections(parser: configparser.ConfigParser) -> tuple[list[FtpConnectionConfig], list[str]]:
     connections: list[FtpConnectionConfig] = []
+    warnings: list[str] = []
     for section_name in parser.sections():
         if not section_name.lower().startswith("ftp_"):
             continue
@@ -89,11 +102,21 @@ def _load_connections(parser: configparser.ConfigParser) -> list[FtpConnectionCo
 
         port = _parse_positive_int(section.get("port", "21"), f"{section_name}.port")
 
+        sample_reason = _detect_sample_setting(host, username, section.get("password", ""))
+        enabled = parse_bool(section.get("enabled", "true"), True)
+        display_name = section.get("display_name", section_name)
+        if sample_reason and enabled:
+            warnings.append(
+                f"Connection '{display_name}' uses {sample_reason}. Please replace it with your real FTP server/credentials."
+            )
+            warnings.append("Sample configuration detected. Skipping this connection.")
+            enabled = False
+
         connections.append(
             FtpConnectionConfig(
                 section_name=section_name,
-                enabled=parse_bool(section.get("enabled", "true"), True),
-                display_name=section.get("display_name", section_name),
+                enabled=enabled,
+                display_name=display_name,
                 protocol=protocol,
                 host=host,
                 port=port,
@@ -107,4 +130,12 @@ def _load_connections(parser: configparser.ConfigParser) -> list[FtpConnectionCo
                 encoding=section.get("encoding", "utf-8"),
             )
         )
-    return connections
+    return connections, warnings
+
+
+def _detect_sample_setting(host: str, username: str, password: str) -> str | None:
+    for raw in (host, username, password):
+        key = raw.strip().lower()
+        if key in SAMPLE_VALUE_WARNINGS:
+            return SAMPLE_VALUE_WARNINGS[key]
+    return None
