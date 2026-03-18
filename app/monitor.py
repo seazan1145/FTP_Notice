@@ -5,7 +5,7 @@ import socket
 from datetime import datetime, timezone
 
 from .db import MonitorDatabase
-from .ftp_client import FtpClient, FtpDataConnectionTlsError
+from .ftp_client import FtpClient, FtpConnectTimeoutError, FtpDataConnectionTlsError
 from .models import AppConfig, FtpConnectionConfig, RemoteFileInfo
 from .notifier import WindowsNotifier
 
@@ -73,6 +73,10 @@ class MonitorService:
             )
             self.logger.info("DNS/name resolution error detail: %s", exc)
             self.logger.debug("Name resolution traceback", exc_info=True)
+        except FtpConnectTimeoutError as exc:
+            self.logger.error("Connection timeout: %s", connection.display_name)
+            self.logger.error("%s", exc)
+            self.logger.debug("Connection timeout traceback", exc_info=True)
         except Exception:
             self.logger.exception("Connection failed: %s", connection.display_name)
         finally:
