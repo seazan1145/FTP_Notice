@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import socket
 import ssl
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from app.ftp_client import FtpClient
+from app.ftp_client import FtpClient, FtpConnectTimeoutError
 from app.models import AppConfig, FtpConnectionConfig, GeneralConfig, RemoteFileInfo
 from app.monitor import MonitorService
 
@@ -122,6 +124,46 @@ class MonitorServiceTests(unittest.TestCase):
         self.assertFalse(db.marked)
         self.assertTrue(db.updated)
         self.assertFalse(db.updated[0][3])
+
+    def test_process_connection_logs_timeout_with_hint(self):
+        general = GeneralConfig(connect_timeout=15)
+        conn = FtpConnectionConfig(
+            section_name="ftp_01",
+            enabled=True,
+            display_name="Sunrise FTP",
+            protocol="ftps-implicit",
+            host="ftps.sunrise-office.net",
+            port=990,
+            username="u",
+            password="p",
+            remote_dirs=["/upload"],
+        )
+        config = AppConfig(general=general, connections=[conn], root_dir=Path("."), db_path=Path("monitor.db"))
+        service = MonitorService(config, FakeDB(None), FakeNotifier(True), logging.getLogger("test"))
+
+        original_connect = FtpClient.connect
+
+        def fake_connect(_self: FtpClient) -> None:
+            raise FtpConnectTimeoutError(
+                host=conn.host,
+                port=conn.port,
+                protocol=conn.protocol,
+                timeout_seconds=general.connect_timeout,
+                phase="connect",
+                original_exc=socket.timeout("timed out"),
+            )
+
+        FtpClient.connect = fake_connect  # type: ignore[method-assign]
+        try:
+            with self.assertLogs("test", level="ERROR") as logs:
+                detected, new_candidates, notified = service.process_connection(conn)
+        finally:
+            FtpClient.connect = original_connect  # type: ignore[method-assign]
+
+        self.assertEqual((detected, new_candidates, notified), (0, 0, 0))
+        output = "\n".join(logs.output)
+        self.assertIn("Connection timeout: Sunrise FTP", output)
+        self.assertIn("確認ポイント", output)
 
 
 if __name__ == "__main__":

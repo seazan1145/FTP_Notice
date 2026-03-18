@@ -35,6 +35,57 @@ class FtpDataConnectionTlsError(RuntimeError):
     """Raised when FTPS data channel TLS/session negotiation fails."""
 
 
+class FtpConnectTimeoutError(TimeoutError):
+    """Raised when control-channel connect/login times out with troubleshooting hints."""
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        protocol: str,
+        timeout_seconds: int,
+        phase: str,
+        original_exc: Exception,
+    ) -> None:
+        hint = _build_connect_timeout_hint(protocol=protocol, port=port)
+        message = (
+            f"Timed out during FTP {phase} after {timeout_seconds}s "
+            f"(host={host}, port={port}, protocol={protocol}). {hint}"
+        )
+        super().__init__(message)
+        self.host = host
+        self.port = port
+        self.protocol = protocol
+        self.timeout_seconds = timeout_seconds
+        self.phase = phase
+        self.original_exc = original_exc
+
+
+def _build_connect_timeout_hint(protocol: str, port: int) -> str:
+    if protocol == "ftps-implicit":
+        return (
+            "確認ポイント: サーバーが Implicit FTPS を許可しているか、"
+            "ポート 990/TCP が許可されているか、ファイアウォール/VPN で遮断されていないかを確認してください。"
+        )
+    if protocol == "ftps-explicit":
+        if port != 21:
+            return (
+                "確認ポイント: Explicit FTPS は通常 21 番ポートです。"
+                "接続先ポートとサーバー設定が一致しているか確認してください。"
+            )
+        return (
+            "確認ポイント: サーバーが Explicit FTPS(FTPES) を許可しているか、"
+            "21/TCP が許可されているか確認してください。"
+        )
+    if protocol == "ftp" and port == 990:
+        return (
+            "確認ポイント: 990 番は一般的に Implicit FTPS 用です。"
+            "FTP 平文で接続していないか、protocol 設定を確認してください。"
+        )
+    return "確認ポイント: ホスト名、ポート、プロトコル、ネットワーク経路を確認してください。"
+
+
 class FtpClient:
     def __init__(self, config: FtpConnectionConfig, general: GeneralConfig, logger: logging.Logger | None = None) -> None:
         self.config = config
@@ -52,8 +103,29 @@ class FtpClient:
             ftp = ftplib.FTP(timeout=self.general.connect_timeout)
 
         self.logger.debug("Connecting with mode=%s host=%s port=%s", mode, self.config.host, self.config.port)
-        ftp.connect(self.config.host, self.config.port)
-        ftp.login(self.config.username, self.config.password)
+        try:
+            ftp.connect(self.config.host, self.config.port)
+        except TimeoutError as exc:
+            raise FtpConnectTimeoutError(
+                host=self.config.host,
+                port=self.config.port,
+                protocol=mode,
+                timeout_seconds=self.general.connect_timeout,
+                phase="connect",
+                original_exc=exc,
+            ) from exc
+
+        try:
+            ftp.login(self.config.username, self.config.password)
+        except TimeoutError as exc:
+            raise FtpConnectTimeoutError(
+                host=self.config.host,
+                port=self.config.port,
+                protocol=mode,
+                timeout_seconds=self.general.connect_timeout,
+                phase="login",
+                original_exc=exc,
+            ) from exc
         ftp.set_pasv(self.general.passive_mode)
         ftp.encoding = self.config.encoding
         ftp.timeout = self.general.read_timeout
