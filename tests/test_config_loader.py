@@ -18,11 +18,8 @@ class ConfigValidationTests(unittest.TestCase):
     def test_invalid_protocol_raises(self):
         path = self._write(
             """
-[general]
-poll_seconds = 10
-stable_seconds = 30
-connect_timeout = 10
-read_timeout = 10
+[notification]
+mode = windows
 
 [ftp_01]
 host = example.com
@@ -37,11 +34,8 @@ remote_dirs = /in
     def test_sample_values_are_warned_and_disabled(self):
         path = self._write(
             """
-[general]
-poll_seconds = 10
-stable_seconds = 30
-connect_timeout = 10
-read_timeout = 10
+[notification]
+mode = windows
 
 [ftp_01]
 enabled = true
@@ -64,8 +58,8 @@ remote_dirs = /in
     def test_invalid_notification_mode_raises(self):
         path = self._write(
             """
-[general]
-notification_mode = invalid
+[notification]
+mode = invalid
 
 [ftp_01]
 host = example.com
@@ -76,6 +70,42 @@ remote_dirs = /in
         )
         with self.assertRaises(ValueError):
             load_config(path)
+
+    def test_mail_settings_loaded_from_ini(self):
+        path = self._write(
+            """
+[notification]
+mode = mail
+
+[mail]
+enabled = true
+provider = gmail
+smtp_server = smtp.gmail.com
+smtp_port = 587
+use_tls = true
+username = sender@gmail.com
+password = app_password
+from_address = sender@gmail.com
+to_address = receiver@example.com
+subject = [FTPWATCH] updated
+
+[ftp_01]
+host = real.example.local
+username = u
+password = p
+protocol = ftp
+remote_dirs = /in
+""".strip()
+        )
+
+        config = load_config(path)
+
+        self.assertEqual(config.notification.mode, "mail")
+        self.assertTrue(config.mail.enabled)
+        self.assertEqual(config.mail.username, "sender@gmail.com")
+        self.assertEqual(config.mail.password, "app_password")
+        self.assertEqual(config.mail.from_address, "sender@gmail.com")
+        self.assertEqual(config.mail.to_address, "receiver@example.com")
 
 
 if __name__ == "__main__":

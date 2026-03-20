@@ -5,3 +5,5 @@ data/monitor.db
 
 # Local runtime config with credentials
 config/ftp_monitor.local.ini
+
+config/ftp_monitor.ini

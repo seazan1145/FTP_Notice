@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-import json
 import logging
 from pathlib import Path
 from typing import Callable
 
-from .models import GeneralConfig, RemoteFileInfo
+from .models import MailConfig, NotificationConfig, RemoteFileInfo
 
 
 class WindowsNotifier:
@@ -45,36 +44,30 @@ class WindowsNotifier:
 
 
 class MailNotifier:
-    def __init__(self, config: GeneralConfig, logger: logging.Logger) -> None:
+    def __init__(self, config: MailConfig, module_path: str, logger: logging.Logger) -> None:
         self.config = config
         self.logger = logger
-        self._send_func: Callable[[dict], bool] | None = None
+        self.module_path = module_path
+        self._send_func: Callable[[dict, MailConfig], bool] | None = None
         self._initialize_mail_module()
 
     def _initialize_mail_module(self) -> None:
-        path_text = (self.config.mail_module_path or "mail.py").strip()
+        path_text = (self.module_path or "mail.py").strip()
         try:
             module = self._load_module(path_text)
-            configure_func = getattr(module, "configure_mail", None)
-            if callable(configure_func):
-                configure_func(
-                    {
-                        "mail_enabled": self.config.mail_enabled,
-                        "mail_smtp_server": self.config.mail_smtp_server,
-                        "mail_smtp_port": self.config.mail_smtp_port,
-                        "mail_from_address": self.config.mail_from_address,
-                        "mail_to_address": self.config.mail_to_address,
-                        "mail_subject": self.config.mail_subject,
-                        "mail_use_tls": self.config.mail_use_tls,
-                        "mail_username": self.config.mail_username,
-                        "mail_password": self.config.mail_password,
-                    }
-                )
             send_func = getattr(module, "send_ftp_notice", None)
             if not callable(send_func):
-                raise AttributeError("send_ftp_notice(data: dict) not found")
+                raise AttributeError("send_ftp_notice(data: dict, config: MailConfig) not found")
             self._send_func = send_func
             self.logger.info("Mail notifier initialized: module=%s", path_text)
+            self.logger.info(
+                "Mail transport: provider=%s smtp=%s:%s tls=%s",
+                self.config.provider,
+                self.config.smtp_server,
+                self.config.smtp_port,
+                self.config.use_tls,
+            )
+            self.logger.info("Mail routing: from=%s to=%s", self.config.from_address, self.config.to_address)
         except Exception:
             self.logger.exception("Mail notifier initialization failed: module=%s", path_text)
 
@@ -96,28 +89,36 @@ class MailNotifier:
             self.logger.error("Mail notifier is unavailable: send function not initialized")
             return False
 
-        self.logger.info("Starting mail send: path=%s size=%s", payload.get("path"), payload.get("size"))
+        self.logger.info("MailNotifier.send_update called: path=%s", payload.get("path"))
         try:
-            ok = bool(self._send_func(payload))
+            ok = bool(self._send_func(payload, self.config))
             if ok:
-                self.logger.info("Mail send success: path=%s", payload.get("path"))
+                self.logger.info("Mail sent: path=%s", payload.get("path"))
                 return True
-            self.logger.error("Mail send failed (function returned false): path=%s", payload.get("path"))
+            self.logger.error("Mail send failed: path=%s", payload.get("path"))
             return False
         except Exception:
-            self.logger.exception("Mail send exception: payload=%s", json.dumps(payload, ensure_ascii=False))
+            self.logger.exception("Mail send failed: path=%s", payload.get("path"))
             return False
 
 
 class NotificationService:
-    def __init__(self, config: GeneralConfig, windows_notifier: WindowsNotifier, mail_notifier: MailNotifier, logger: logging.Logger) -> None:
-        self.config = config
+    def __init__(
+        self,
+        notification: NotificationConfig,
+        mail: MailConfig,
+        windows_notifier: WindowsNotifier,
+        mail_notifier: MailNotifier,
+        logger: logging.Logger,
+    ) -> None:
+        self.notification = notification
+        self.mail = mail
         self.windows_notifier = windows_notifier
         self.mail_notifier = mail_notifier
         self.logger = logger
 
     def send_update(self, connection_name: str, file_info: RemoteFileInfo, payload: dict) -> bool:
-        mode = self.config.notification_mode
+        mode = self.notification.mode
         win_message = f"[{connection_name}]\n{file_info.remote_dir}\n{file_info.file_name}"
 
         if mode == "windows":
