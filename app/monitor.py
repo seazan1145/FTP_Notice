@@ -8,6 +8,7 @@ from .db import MonitorDatabase
 from .ftp_client import FtpClient, FtpConnectTimeoutError, FtpDataConnectionTlsError
 from .models import AppConfig, FtpConnectionConfig, RemoteFileInfo
 from .notifier import NotificationService
+from .time_utils import normalize_ftp_datetime, parse_ftp_datetime, to_utc_isoformat
 
 
 def _parse_iso(value: str | None) -> datetime:
@@ -184,14 +185,28 @@ class MonitorService:
 
     def _build_notice_payload(self, file_info: RemoteFileInfo) -> dict:
         now_iso = datetime.now(timezone.utc).isoformat()
-        hash_key = f"{file_info.remote_path}_{file_info.file_size}"
-        if file_info.modified_at:
-            hash_key = f"{hash_key}_{file_info.modified_at}"
+        parsed_modified_at = parse_ftp_datetime(file_info.modified_at)
+        if parsed_modified_at is None:
+            normalized_last_modified = normalize_ftp_datetime(file_info.modified_at)
+            self.logger.warning(
+                "Failed to parse modified_at, fallback to now: raw=%s path=%s",
+                file_info.modified_at,
+                file_info.remote_path,
+            )
+        else:
+            normalized_last_modified = to_utc_isoformat(parsed_modified_at)
+            self.logger.info(
+                "Normalized modified_at: raw=%s normalized=%s path=%s",
+                file_info.modified_at,
+                normalized_last_modified,
+                file_info.remote_path,
+            )
+        hash_key = f"{file_info.remote_path}_{file_info.file_size}_{normalized_last_modified}"
         return {
             "path": file_info.remote_path,
             "fileName": file_info.file_name,
             "folder": file_info.remote_dir,
-            "lastModified": file_info.modified_at or now_iso,
+            "lastModified": normalized_last_modified,
             "size": file_info.file_size,
             "status": "updated",
             "lastChecked": now_iso,

@@ -53,6 +53,10 @@ notify_existing_on_start = false
 ## メール本文
 - MIME: `text/plain; charset=utf-8`
 - 本文: JSON のみ（Power Automate Parse JSON 前提）
+- FTP の `modified_at` が `YYYYMMDDHHMMSS(.fff)` 形式でも、メール本文の `lastModified` は ISO 8601 に正規化して送信
+- タイムゾーン未指定（naive）の `modified_at` は **UTC として扱う** 方針
+- 不正値や未知形式の `modified_at` は現在UTC時刻へフォールバック（通知処理は継続）
+- `hashKey` は `remote_path + file_size + 正規化済みlastModified` で生成
 
 ```json
 {
@@ -66,6 +70,13 @@ notify_existing_on_start = false
   "hashKey": "/upload/file.png_12345_2026-03-20T10:00:00+00:00"
 }
 ```
+
+### `lastModified` 正規化対応フォーマット
+- `datetime` オブジェクト
+- ISO 8601 文字列（例: `2026-03-20T07:03:29.322626+00:00`）
+- FTP形式（例: `20260318110227.000`）
+- FTP形式（例: `20260318110227`）
+- `None` / 不正文字列（フォールバック）
 
 ## ログの見方
 - 初期化:

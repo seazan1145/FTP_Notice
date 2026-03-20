@@ -206,6 +206,45 @@ class MonitorServiceTests(unittest.TestCase):
         _, notified = service.process_file(service.config.connections[0], RemoteFileInfo("test", "/upload", "/upload/file.txt", "file.txt", 100))
         self.assertTrue(notified)
 
+    def test_payload_last_modified_normalized_and_hash_uses_normalized_value(self):
+        now = datetime.now(timezone.utc)
+        row = {
+            "id": 1,
+            "file_size": 100,
+            "modified_at": "20260318110227.000",
+            "is_notified": 0,
+            "last_size_change_at": (now - timedelta(seconds=120)).isoformat(),
+        }
+        db = FakeDB(row)
+        notifier = FakeNotificationService(True)
+        service = MonitorService(self._build_config("mail"), db, notifier, logging.getLogger("test"))
+
+        _, notified = service.process_file(
+            service.config.connections[0],
+            RemoteFileInfo("test", "/upload", "/upload/file.txt", "file.txt", 100, modified_at="20260318110227.000"),
+        )
+
+        self.assertTrue(notified)
+        payload = notifier.calls[0]
+        self.assertEqual(payload["lastModified"], "2026-03-18T11:02:27+00:00")
+        self.assertEqual(payload["hashKey"], "/upload/file.txt_100_2026-03-18T11:02:27+00:00")
+
+    def test_invalid_modified_at_fallback_does_not_break_notification(self):
+        now = datetime.now(timezone.utc)
+        row = {"id": 1, "file_size": 100, "modified_at": "invalid", "is_notified": 0, "last_size_change_at": (now - timedelta(seconds=120)).isoformat()}
+        db = FakeDB(row)
+        notifier = FakeNotificationService(True)
+        service = MonitorService(self._build_config("mail"), db, notifier, logging.getLogger("test"))
+
+        _, notified = service.process_file(
+            service.config.connections[0],
+            RemoteFileInfo("test", "/upload", "/upload/file.txt", "file.txt", 100, modified_at="invalid"),
+        )
+
+        self.assertTrue(notified)
+        payload = notifier.calls[0]
+        self.assertIsNotNone(datetime.fromisoformat(payload["lastModified"]))
+
     def test_process_connection_logs_timeout_with_hint(self):
         general = GeneralConfig(connect_timeout=15)
         conn = FtpConnectionConfig(
