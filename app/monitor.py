@@ -22,6 +22,7 @@ class MonitorService:
         self.db = db
         self.notifier = notifier
         self.logger = logger
+        self._first_scan_completed = False
 
     def run_once(self) -> None:
         enabled = [c for c in self.config.connections if c.enabled]
@@ -40,6 +41,7 @@ class MonitorService:
             new_candidate_count,
             notified_count,
         )
+        self._first_scan_completed = True
 
     def process_connection(self, connection: FtpConnectionConfig) -> tuple[int, int, int]:
         client = FtpClient(connection, self.config.general, logger=self.logger)
@@ -96,46 +98,95 @@ class MonitorService:
                     "remote_path": file_info.remote_path,
                     "file_name": file_info.file_name,
                     "file_size": file_info.file_size,
+                    "modified_at": file_info.modified_at,
                 }
             )
-            self.logger.info("New candidate detected: %s size=%s", file_info.remote_path, file_info.file_size)
+            self.logger.info("Candidate inserted: path=%s size=%s", file_info.remote_path, file_info.file_size)
+            if not self.config.startup.notify_existing_on_start and not self._first_scan_completed:
+                self.logger.info("Startup existing file registered without notification: path=%s", file_info.remote_path)
             return (True, False)
 
-        if int(row["is_notified"]) == 1:
-            self.logger.debug("Skipping already notified file: %s", file_info.remote_path)
-            return (False, False)
-
         old_size = int(row["file_size"] or 0)
+        old_modified_at = row["modified_at"]
         size_changed = old_size != file_info.file_size
+        modified_changed = (old_modified_at or "") != (file_info.modified_at or "") and bool(file_info.modified_at)
+        changed = size_changed or modified_changed
+
+        if changed:
+            self.logger.info(
+                "Existing file changed: path=%s size_changed=%s modified_changed=%s",
+                file_info.remote_path,
+                size_changed,
+                modified_changed,
+            )
+
+        rearm_notification = int(row["is_notified"]) == 1 and changed
         now = datetime.now(timezone.utc)
         last_change = _parse_iso(row["last_size_change_at"])
 
-        stable_age = (now - last_change).total_seconds()
-        is_stable = (not size_changed) and stable_age >= self.config.general.stable_seconds
+        if changed:
+            stable_age = 0.0
+            is_stable = False
+        else:
+            stable_age = (now - last_change).total_seconds()
+            is_stable = stable_age >= self.config.general.stable_seconds
 
-        self.db.update_seen(int(row["id"]), file_info.file_size, size_changed=size_changed, is_stable=is_stable)
+        self.db.update_seen(
+            int(row["id"]),
+            file_info.file_size,
+            file_info.modified_at,
+            size_changed=size_changed,
+            modified_changed=modified_changed,
+            is_stable=is_stable,
+            rearm_notification=rearm_notification,
+        )
 
-        if size_changed:
-            self.logger.info("Size changed: %s old=%s new=%s", file_info.remote_path, old_size, file_info.file_size)
+        if rearm_notification:
+            self.logger.info(
+                "Re-armed candidate due to change: path=%s old_size=%s new_size=%s",
+                file_info.remote_path,
+                old_size,
+                file_info.file_size,
+            )
+
+        if changed:
+            self.logger.info(
+                "Candidate waiting stable after change: path=%s stable_seconds=%s",
+                file_info.remote_path,
+                self.config.general.stable_seconds,
+            )
             return (False, False)
 
-        if is_stable:
-            payload = self._build_notice_payload(file_info)
-            self.logger.info("Notification check (stable): mode=%s path=%s", self.config.general.notification_mode, file_info.remote_path)
-            ok = self.notifier.send_update(connection.display_name, file_info, payload)
-            if ok:
-                self.db.mark_notified(int(row["id"]))
-                self.logger.info("Notification sent and marked notified: %s", file_info.remote_path)
-                return (False, True)
+        if int(row["is_notified"]) == 1 and not changed:
+            self.logger.info("Skip already notified: path=%s", file_info.remote_path)
+            return (False, False)
 
-            self.logger.error(
-                "Notification failed, keeping record as unnotified: %s",
+        if not is_stable:
+            self.logger.info(
+                "Candidate waiting stable: path=%s elapsed=%s stable_seconds=%s",
                 file_info.remote_path,
+                int(stable_age),
+                self.config.general.stable_seconds,
             )
+            return (False, False)
+
+        self.logger.info("Candidate stable, sending notification: path=%s", file_info.remote_path)
+        payload = self._build_notice_payload(file_info)
+        self.logger.info("Notification dispatch: mode=%s path=%s", self.config.notification.mode, file_info.remote_path)
+        ok = self.notifier.send_update(connection.display_name, file_info, payload)
+        if ok:
+            self.db.mark_notified(int(row["id"]))
+            self.logger.info("Marked notified: path=%s", file_info.remote_path)
+            return (False, True)
+
+        self.logger.error("Notification failed, mark_notified skipped: path=%s", file_info.remote_path)
         return (False, False)
 
     def _build_notice_payload(self, file_info: RemoteFileInfo) -> dict:
         now_iso = datetime.now(timezone.utc).isoformat()
+        hash_key = f"{file_info.remote_path}_{file_info.file_size}"
+        if file_info.modified_at:
+            hash_key = f"{hash_key}_{file_info.modified_at}"
         return {
             "path": file_info.remote_path,
             "fileName": file_info.file_name,
@@ -144,21 +195,21 @@ class MonitorService:
             "size": file_info.file_size,
             "status": "updated",
             "lastChecked": now_iso,
-            "hashKey": f"{file_info.remote_path}_{file_info.file_size}",
+            "hashKey": hash_key,
         }
 
     def _matches_filters(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> bool:
         lower_name = file_info.file_name.lower()
         for token in connection.exclude_name_contains:
             if token.lower() in lower_name:
-                self.logger.debug("Skipping file by exclude_name_contains: %s token=%s", file_info.remote_path, token)
+                self.logger.info("Skip by filter: path=%s reason=exclude_name_contains:%s", file_info.remote_path, token)
                 return False
 
         ext = lower_name.rsplit(".", 1)[-1] if "." in lower_name else ""
         if connection.include_extensions and ext not in connection.include_extensions:
-            self.logger.debug("Skipping file by include_extensions: %s ext=%s", file_info.remote_path, ext)
+            self.logger.info("Skip by filter: path=%s reason=include_extensions", file_info.remote_path)
             return False
         if connection.exclude_extensions and ext in connection.exclude_extensions:
-            self.logger.debug("Skipping file by exclude_extensions: %s ext=%s", file_info.remote_path, ext)
+            self.logger.info("Skip by filter: path=%s reason=exclude_extensions", file_info.remote_path)
             return False
         return True

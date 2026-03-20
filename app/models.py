@@ -6,6 +6,30 @@ from typing import Optional
 
 
 @dataclass(slots=True)
+class NotificationConfig:
+    mode: str = "windows"
+
+
+@dataclass(slots=True)
+class MailConfig:
+    enabled: bool = False
+    provider: str = "gmail"
+    smtp_server: str = ""
+    smtp_port: int = 587
+    use_tls: bool = True
+    username: str = ""
+    password: str = ""
+    from_address: str = ""
+    to_address: str = ""
+    subject: str = "[FTPWATCH] updated"
+
+
+@dataclass(slots=True)
+class StartupConfig:
+    notify_existing_on_start: bool = False
+
+
+@dataclass(slots=True)
 class GeneralConfig:
     poll_seconds: int = 60
     stable_seconds: int = 30
@@ -13,17 +37,7 @@ class GeneralConfig:
     read_timeout: int = 30
     passive_mode: bool = True
     log_level: str = "INFO"
-    notification_mode: str = "windows"
     mail_module_path: str = "mail.py"
-    mail_enabled: bool = False
-    mail_smtp_server: str = ""
-    mail_smtp_port: int = 587
-    mail_from_address: str = ""
-    mail_to_address: str = ""
-    mail_subject: str = "[FTPWATCH] updated"
-    mail_use_tls: bool = True
-    mail_username: str = ""
-    mail_password: str = ""
 
 
 @dataclass(slots=True)
@@ -47,6 +61,9 @@ class FtpConnectionConfig:
 @dataclass(slots=True)
 class AppConfig:
     general: GeneralConfig
+    notification: NotificationConfig
+    mail: MailConfig
+    startup: StartupConfig
     connections: list[FtpConnectionConfig]
     root_dir: Path
     db_path: Path

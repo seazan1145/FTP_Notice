@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS observed_files (
     remote_path TEXT NOT NULL,
     file_name TEXT NOT NULL,
     file_size INTEGER,
+    modified_at TEXT,
     first_seen_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL,
     last_size_change_at TEXT,
@@ -38,6 +39,10 @@ class MonitorDatabase:
 
     def initialize(self) -> None:
         self._conn.execute(SCHEMA)
+        try:
+            self._conn.execute("ALTER TABLE observed_files ADD COLUMN modified_at TEXT")
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
 
     def get_observed_file(self, connection_name: str, remote_path: str) -> sqlite3.Row | None:
@@ -52,10 +57,10 @@ class MonitorDatabase:
         self._conn.execute(
             """
             INSERT INTO observed_files (
-                connection_name, remote_dir, remote_path, file_name, file_size,
+                connection_name, remote_dir, remote_path, file_name, file_size, modified_at,
                 first_seen_at, last_seen_at, last_size_change_at,
                 is_stable, is_notified, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
             """,
             (
                 payload["connection_name"],
@@ -63,6 +68,7 @@ class MonitorDatabase:
                 payload["remote_path"],
                 payload["file_name"],
                 payload["file_size"],
+                payload.get("modified_at"),
                 now,
                 now,
                 now,
@@ -72,25 +78,49 @@ class MonitorDatabase:
         )
         self._conn.commit()
 
-    def update_seen(self, record_id: int, file_size: int, size_changed: bool, is_stable: bool) -> None:
+    def update_seen(
+        self,
+        record_id: int,
+        file_size: int,
+        modified_at: str | None,
+        *,
+        size_changed: bool,
+        modified_changed: bool,
+        is_stable: bool,
+        rearm_notification: bool,
+    ) -> None:
         now = utc_now_iso()
-        if size_changed:
-            self._conn.execute(
-                """
-                UPDATE observed_files
-                SET file_size=?, last_seen_at=?, last_size_change_at=?, is_stable=?, updated_at=?
-                WHERE id=?
-                """,
-                (file_size, now, now, int(is_stable), now, record_id),
-            )
+        change_detected = size_changed or modified_changed
+        next_is_notified = 0 if rearm_notification else None
+
+        if change_detected:
+            if next_is_notified is None:
+                self._conn.execute(
+                    """
+                    UPDATE observed_files
+                    SET file_size=?, modified_at=?, last_seen_at=?, last_size_change_at=?, is_stable=?, updated_at=?
+                    WHERE id=?
+                    """,
+                    (file_size, modified_at, now, now, int(is_stable), now, record_id),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    UPDATE observed_files
+                    SET file_size=?, modified_at=?, last_seen_at=?, last_size_change_at=?, is_stable=?,
+                        is_notified=?, notified_at=NULL, updated_at=?
+                    WHERE id=?
+                    """,
+                    (file_size, modified_at, now, now, int(is_stable), next_is_notified, now, record_id),
+                )
         else:
             self._conn.execute(
                 """
                 UPDATE observed_files
-                SET last_seen_at=?, is_stable=?, updated_at=?
+                SET modified_at=?, last_seen_at=?, is_stable=?, updated_at=?
                 WHERE id=?
                 """,
-                (now, int(is_stable), now, record_id),
+                (modified_at, now, int(is_stable), now, record_id),
             )
         self._conn.commit()
 

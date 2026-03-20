@@ -51,8 +51,12 @@ def main() -> int:
     db.initialize()
 
     windows_notifier = WindowsNotifier(logger)
-    mail_notifier = MailNotifier(config.general, logger)
-    notifier = NotificationService(config.general, windows_notifier, mail_notifier, logger)
+    mail_notifier = MailNotifier(config.mail, config.general.mail_module_path, logger)
+    notifier = NotificationService(config.notification, config.mail, windows_notifier, mail_notifier, logger)
+
+    logger.info("Notification mode resolved: %s", config.notification.mode)
+    logger.info("Windows notifier enabled: %s", config.notification.mode in {"windows", "both"})
+    logger.info("Mail notifier enabled: %s", config.mail.enabled and config.notification.mode in {"mail", "both"})
 
     if not windows_notifier.available:
         logger.warning("Desktop notifications are currently disabled (backend=%s).", windows_notifier.backend_name)

@@ -3,7 +3,14 @@ from __future__ import annotations
 import configparser
 from pathlib import Path
 
-from .models import AppConfig, FtpConnectionConfig, GeneralConfig
+from .models import (
+    AppConfig,
+    FtpConnectionConfig,
+    GeneralConfig,
+    MailConfig,
+    NotificationConfig,
+    StartupConfig,
+)
 from .utils import parse_bool, parse_csv
 
 
@@ -49,11 +56,23 @@ def load_config(config_path: Path = DEFAULT_CONFIG_PATH, root_dir: Path | None =
     parser.read(config_path, encoding="utf-8")
 
     general = _load_general(parser)
+    notification = _load_notification(parser)
+    mail = _load_mail(parser)
+    startup = _load_startup(parser)
     connections, warnings = _load_connections(parser)
 
     base = root_dir or Path(__file__).resolve().parents[1]
     db_path = base / "data" / "monitor.db"
-    return AppConfig(general=general, connections=connections, root_dir=base, db_path=db_path, warnings=warnings)
+    return AppConfig(
+        general=general,
+        notification=notification,
+        mail=mail,
+        startup=startup,
+        connections=connections,
+        root_dir=base,
+        db_path=db_path,
+        warnings=warnings,
+    )
 
 
 def _parse_positive_int(raw: str, field_name: str, minimum: int = 1) -> int:
@@ -68,13 +87,6 @@ def _parse_positive_int(raw: str, field_name: str, minimum: int = 1) -> int:
 
 def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
     section = parser["general"] if parser.has_section("general") else {}
-    notification_mode = section.get("notification_mode", "windows").strip().lower()
-    if notification_mode not in ALLOWED_NOTIFICATION_MODES:
-        raise ValueError(
-            "Invalid general.notification_mode: "
-            f"'{notification_mode}'. Allowed values: {', '.join(sorted(ALLOWED_NOTIFICATION_MODES))}"
-        )
-
     return GeneralConfig(
         poll_seconds=_parse_positive_int(section.get("poll_seconds", "60"), "general.poll_seconds"),
         stable_seconds=_parse_positive_int(section.get("stable_seconds", "30"), "general.stable_seconds"),
@@ -82,18 +94,53 @@ def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
         read_timeout=_parse_positive_int(section.get("read_timeout", "30"), "general.read_timeout"),
         passive_mode=parse_bool(section.get("passive_mode", "true"), True),
         log_level=section.get("log_level", "INFO"),
-        notification_mode=notification_mode,
         mail_module_path=section.get("mail_module_path", "mail.py").strip() or "mail.py",
-        mail_enabled=parse_bool(section.get("mail_enabled", "false"), False),
-        mail_smtp_server=section.get("mail_smtp_server", "").strip(),
-        mail_smtp_port=_parse_positive_int(section.get("mail_smtp_port", "587"), "general.mail_smtp_port"),
-        mail_from_address=section.get("mail_from_address", "").strip(),
-        mail_to_address=section.get("mail_to_address", "").strip(),
-        mail_subject=section.get("mail_subject", "[FTPWATCH] updated").strip() or "[FTPWATCH] updated",
-        mail_use_tls=parse_bool(section.get("mail_use_tls", "true"), True),
-        mail_username=section.get("mail_username", "").strip(),
-        mail_password=section.get("mail_password", "").strip(),
     )
+
+
+def _load_notification(parser: configparser.ConfigParser) -> NotificationConfig:
+    section = parser["notification"] if parser.has_section("notification") else {}
+    mode = section.get("mode", "windows").strip().lower()
+    if mode not in ALLOWED_NOTIFICATION_MODES:
+        raise ValueError(
+            "Invalid notification.mode: "
+            f"'{mode}'. Allowed values: {', '.join(sorted(ALLOWED_NOTIFICATION_MODES))}"
+        )
+    return NotificationConfig(mode=mode)
+
+
+def _load_mail(parser: configparser.ConfigParser) -> MailConfig:
+    section = parser["mail"] if parser.has_section("mail") else {}
+    provider = section.get("provider", "gmail").strip().lower() or "gmail"
+
+    smtp_server = section.get("smtp_server", "").strip()
+    smtp_port = _parse_positive_int(section.get("smtp_port", "587"), "mail.smtp_port")
+    use_tls = parse_bool(section.get("use_tls", "true"), True)
+
+    if provider == "gmail":
+        smtp_server = smtp_server or "smtp.gmail.com"
+        if "smtp_port" not in section:
+            smtp_port = 587
+        if "use_tls" not in section:
+            use_tls = True
+
+    return MailConfig(
+        enabled=parse_bool(section.get("enabled", "false"), False),
+        provider=provider,
+        smtp_server=smtp_server,
+        smtp_port=smtp_port,
+        use_tls=use_tls,
+        username=section.get("username", "").strip(),
+        password=section.get("password", "").strip(),
+        from_address=section.get("from_address", "").strip(),
+        to_address=section.get("to_address", "").strip(),
+        subject=section.get("subject", "[FTPWATCH] updated").strip() or "[FTPWATCH] updated",
+    )
+
+
+def _load_startup(parser: configparser.ConfigParser) -> StartupConfig:
+    section = parser["startup"] if parser.has_section("startup") else {}
+    return StartupConfig(notify_existing_on_start=parse_bool(section.get("notify_existing_on_start", "false"), False))
 
 
 def _load_connections(parser: configparser.ConfigParser) -> tuple[list[FtpConnectionConfig], list[str]]:
