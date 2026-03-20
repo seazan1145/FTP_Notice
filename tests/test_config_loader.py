@@ -61,6 +61,22 @@ remote_dirs = /in
         self.assertTrue(any("ftp.example.com" in message for message in config.warnings))
         self.assertIn("Sample configuration detected. Skipping this connection.", config.warnings)
 
+    def test_invalid_notification_mode_raises(self):
+        path = self._write(
+            """
+[general]
+notification_mode = invalid
+
+[ftp_01]
+host = example.com
+username = u
+protocol = ftp
+remote_dirs = /in
+""".strip()
+        )
+        with self.assertRaises(ValueError):
+            load_config(path)
+
 
 if __name__ == "__main__":
     unittest.main()

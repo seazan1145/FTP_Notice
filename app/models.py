@@ -13,6 +13,17 @@ class GeneralConfig:
     read_timeout: int = 30
     passive_mode: bool = True
     log_level: str = "INFO"
+    notification_mode: str = "windows"
+    mail_module_path: str = "mail.py"
+    mail_enabled: bool = False
+    mail_smtp_server: str = ""
+    mail_smtp_port: int = 587
+    mail_from_address: str = ""
+    mail_to_address: str = ""
+    mail_subject: str = "[FTPWATCH] updated"
+    mail_use_tls: bool = True
+    mail_username: str = ""
+    mail_password: str = ""
 
 
 @dataclass(slots=True)
