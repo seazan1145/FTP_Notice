@@ -8,8 +8,9 @@ from pathlib import Path
 from .config_loader import DEFAULT_CONFIG_PATH, DEFAULT_SAMPLE_CONFIG_PATH, load_config
 from .db import MonitorDatabase
 from .logger_setup import setup_logger
+from .models import RemoteFileInfo
 from .monitor import MonitorService
-from .notifier import WindowsNotifier
+from .notifier import MailNotifier, NotificationService, WindowsNotifier
 from .utils import ensure_dir
 
 
@@ -49,17 +50,37 @@ def main() -> int:
     db = MonitorDatabase(config.db_path)
     db.initialize()
 
-    notifier = WindowsNotifier(logger)
-    if not notifier.available:
-        logger.warning("Desktop notifications are currently disabled (backend=%s).", notifier.backend_name)
+    windows_notifier = WindowsNotifier(logger)
+    mail_notifier = MailNotifier(config.general, logger)
+    notifier = NotificationService(config.general, windows_notifier, mail_notifier, logger)
+
+    if not windows_notifier.available:
+        logger.warning("Desktop notifications are currently disabled (backend=%s).", windows_notifier.backend_name)
 
     if args.test_notify:
-        ok = notifier.send_windows_notification("FTP新着ファイル", "[Test]\n/test\nexample.txt")
+        test_file = RemoteFileInfo(
+            connection_name="test",
+            remote_dir="/test",
+            remote_path="/test/example.txt",
+            file_name="example.txt",
+            file_size=123,
+        )
+        payload = {
+            "path": test_file.remote_path,
+            "fileName": test_file.file_name,
+            "folder": test_file.remote_dir,
+            "lastModified": "1970-01-01T00:00:00+00:00",
+            "size": test_file.file_size,
+            "status": "updated",
+            "lastChecked": "1970-01-01T00:00:00+00:00",
+            "hashKey": f"{test_file.remote_path}_{test_file.file_size}",
+        }
+        ok = notifier.send_update("test", test_file, payload)
         if ok:
             logger.info("Test notification sent successfully.")
             db.close()
             return 0
-        logger.error("Test notification failed. Ensure notification dependency is installed and backend is available.")
+        logger.error("Test notification failed. Check notification_mode and corresponding settings/dependencies.")
         db.close()
         return 1
 

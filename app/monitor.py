@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from .db import MonitorDatabase
 from .ftp_client import FtpClient, FtpConnectTimeoutError, FtpDataConnectionTlsError
 from .models import AppConfig, FtpConnectionConfig, RemoteFileInfo
-from .notifier import WindowsNotifier
+from .notifier import NotificationService
 
 
 def _parse_iso(value: str | None) -> datetime:
@@ -17,7 +17,7 @@ def _parse_iso(value: str | None) -> datetime:
 
 
 class MonitorService:
-    def __init__(self, config: AppConfig, db: MonitorDatabase, notifier: WindowsNotifier, logger: logging.Logger) -> None:
+    def __init__(self, config: AppConfig, db: MonitorDatabase, notifier: NotificationService, logger: logging.Logger) -> None:
         self.config = config
         self.db = db
         self.notifier = notifier
@@ -120,11 +120,12 @@ class MonitorService:
             return (False, False)
 
         if is_stable:
-            message = f"[{connection.display_name}]\n{file_info.remote_dir}\n{file_info.file_name}"
-            ok = self.notifier.send_windows_notification("FTP新着ファイル", message)
+            payload = self._build_notice_payload(file_info)
+            self.logger.info("Notification check (stable): mode=%s path=%s", self.config.general.notification_mode, file_info.remote_path)
+            ok = self.notifier.send_update(connection.display_name, file_info, payload)
             if ok:
                 self.db.mark_notified(int(row["id"]))
-                self.logger.info("Notification sent: %s", file_info.remote_path)
+                self.logger.info("Notification sent and marked notified: %s", file_info.remote_path)
                 return (False, True)
 
             self.logger.error(
@@ -132,6 +133,19 @@ class MonitorService:
                 file_info.remote_path,
             )
         return (False, False)
+
+    def _build_notice_payload(self, file_info: RemoteFileInfo) -> dict:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        return {
+            "path": file_info.remote_path,
+            "fileName": file_info.file_name,
+            "folder": file_info.remote_dir,
+            "lastModified": file_info.modified_at or now_iso,
+            "size": file_info.file_size,
+            "status": "updated",
+            "lastChecked": now_iso,
+            "hashKey": f"{file_info.remote_path}_{file_info.file_size}",
+        }
 
     def _matches_filters(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> bool:
         lower_name = file_info.file_name.lower()

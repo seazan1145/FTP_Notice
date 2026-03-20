@@ -10,6 +10,7 @@ from .utils import parse_bool, parse_csv
 DEFAULT_CONFIG_PATH = Path("config/ftp_monitor.ini")
 DEFAULT_SAMPLE_CONFIG_PATH = Path("config/ftp_monitor.sample.ini")
 ALLOWED_PROTOCOLS = {"ftp", "ftps-explicit", "ftps-implicit"}
+ALLOWED_NOTIFICATION_MODES = {"windows", "mail", "both"}
 
 
 SAMPLE_VALUE_WARNINGS = {
@@ -67,6 +68,13 @@ def _parse_positive_int(raw: str, field_name: str, minimum: int = 1) -> int:
 
 def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
     section = parser["general"] if parser.has_section("general") else {}
+    notification_mode = section.get("notification_mode", "windows").strip().lower()
+    if notification_mode not in ALLOWED_NOTIFICATION_MODES:
+        raise ValueError(
+            "Invalid general.notification_mode: "
+            f"'{notification_mode}'. Allowed values: {', '.join(sorted(ALLOWED_NOTIFICATION_MODES))}"
+        )
+
     return GeneralConfig(
         poll_seconds=_parse_positive_int(section.get("poll_seconds", "60"), "general.poll_seconds"),
         stable_seconds=_parse_positive_int(section.get("stable_seconds", "30"), "general.stable_seconds"),
@@ -74,6 +82,17 @@ def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
         read_timeout=_parse_positive_int(section.get("read_timeout", "30"), "general.read_timeout"),
         passive_mode=parse_bool(section.get("passive_mode", "true"), True),
         log_level=section.get("log_level", "INFO"),
+        notification_mode=notification_mode,
+        mail_module_path=section.get("mail_module_path", "mail.py").strip() or "mail.py",
+        mail_enabled=parse_bool(section.get("mail_enabled", "false"), False),
+        mail_smtp_server=section.get("mail_smtp_server", "").strip(),
+        mail_smtp_port=_parse_positive_int(section.get("mail_smtp_port", "587"), "general.mail_smtp_port"),
+        mail_from_address=section.get("mail_from_address", "").strip(),
+        mail_to_address=section.get("mail_to_address", "").strip(),
+        mail_subject=section.get("mail_subject", "[FTPWATCH] updated").strip() or "[FTPWATCH] updated",
+        mail_use_tls=parse_bool(section.get("mail_use_tls", "true"), True),
+        mail_username=section.get("mail_username", "").strip(),
+        mail_password=section.get("mail_password", "").strip(),
     )
 
 
