@@ -39,6 +39,15 @@ PROTOCOL_ALIASES = {
 }
 
 
+def parse_remote_dirs(raw_value: str) -> list[str]:
+    value = (raw_value or "").strip()
+    if not value:
+        return []
+    if "|" in value:
+        return [item.strip() for item in value.split("|") if item.strip()]
+    return parse_csv(value)
+
+
 def normalize_protocol(raw_protocol: str) -> str:
     protocol = raw_protocol.lower().strip()
     normalized = PROTOCOL_ALIASES.get(protocol)
@@ -162,7 +171,7 @@ def _load_connections(parser: configparser.ConfigParser) -> tuple[list[FtpConnec
                 f"Invalid {section_name}.protocol: {exc}"
             ) from exc
 
-        remote_dirs = parse_csv(section.get("remote_dirs", ""))
+        remote_dirs = parse_remote_dirs(section.get("remote_dirs", ""))
         if not remote_dirs:
             raise ValueError(f"Invalid {section_name}: remote_dirs must not be empty")
 
