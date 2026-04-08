@@ -34,6 +34,13 @@ password = your_app_password
 notify_existing_on_start = false
 ```
 
+### `remote_dirs` の書式
+- 優先書式: `|` 区切り（例: `remote_dirs = /kawamura/to_sunrise/|/kawamura/from_sunrise/`）
+- 各要素は前後空白を自動で trim
+- 空要素は無視（末尾 `|` があっても動作）
+- 後方互換: `|` を含まない場合は従来どおりカンマ CSV として解釈（例: `/upload,/upload/layout`）
+- パース後に有効ディレクトリが 1 件もない場合は設定エラー
+
 ## Gmail 送信設定手順
 1. Google アカウントで 2 段階認証を有効化。
 2. Google のアプリパスワードを作成。

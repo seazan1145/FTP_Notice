@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.config_loader import load_config
+from app.config_loader import load_config, parse_remote_dirs
 
 
 class ConfigValidationTests(unittest.TestCase):
@@ -106,6 +106,34 @@ remote_dirs = /in
         self.assertEqual(config.mail.password, "app_password")
         self.assertEqual(config.mail.from_address, "sender@gmail.com")
         self.assertEqual(config.mail.to_address, "receiver@example.com")
+
+    def test_parse_remote_dirs_pipe_delimited(self):
+        self.assertEqual(parse_remote_dirs("/a|/b"), ["/a", "/b"])
+
+    def test_parse_remote_dirs_trims_whitespace(self):
+        self.assertEqual(parse_remote_dirs(" /a/ |  /b/ "), ["/a/", "/b/"])
+
+    def test_parse_remote_dirs_ignores_trailing_pipe(self):
+        self.assertEqual(parse_remote_dirs("/a|/b|"), ["/a", "/b"])
+
+    def test_parse_remote_dirs_csv_backward_compatible(self):
+        self.assertEqual(parse_remote_dirs("/upload,/upload/layout"), ["/upload", "/upload/layout"])
+
+    def test_empty_remote_dirs_raises(self):
+        path = self._write(
+            """
+[notification]
+mode = windows
+
+[ftp_01]
+host = example.com
+username = u
+protocol = ftp
+remote_dirs =   |   
+""".strip()
+        )
+        with self.assertRaises(ValueError):
+            load_config(path)
 
 
 if __name__ == "__main__":

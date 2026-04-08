@@ -292,6 +292,126 @@ class MonitorServiceTests(unittest.TestCase):
         output = "\n".join(logs.output)
         self.assertIn("Connection timeout: Sunrise FTP", output)
 
+    def test_process_connection_scans_multiple_directories_with_single_connect(self):
+        general = GeneralConfig(connect_timeout=15)
+        conn = FtpConnectionConfig(
+            section_name="ftp_01",
+            enabled=True,
+            display_name="Sunrise FTP",
+            protocol="ftp",
+            host="real.host.local",
+            port=21,
+            username="u",
+            password="p",
+            remote_dirs=["/to", "/from"],
+        )
+        config = AppConfig(
+            general=general,
+            notification=NotificationConfig(mode="windows"),
+            mail=MailConfig(),
+            startup=StartupConfig(),
+            connections=[conn],
+            root_dir=Path("."),
+            db_path=Path("monitor.db"),
+        )
+        service = MonitorService(config, FakeDB(None), FakeNotificationService(True), logging.getLogger("test"))
+
+        calls: dict[str, list[str] | int] = {"list_dirs": [], "connect": 0, "disconnect": 0}
+        original_connect = FtpClient.connect
+        original_disconnect = FtpClient.disconnect
+        original_list_files = FtpClient.list_files
+        original_process_file = MonitorService.process_file
+
+        def fake_connect(_self: FtpClient) -> None:
+            calls["connect"] += 1  # type: ignore[operator]
+
+        def fake_disconnect(_self: FtpClient) -> None:
+            calls["disconnect"] += 1  # type: ignore[operator]
+
+        def fake_list_files(_self: FtpClient, remote_dir: str, recursive: bool = False) -> list[RemoteFileInfo]:
+            assert recursive is False
+            calls["list_dirs"].append(remote_dir)  # type: ignore[union-attr]
+            return [RemoteFileInfo("test", remote_dir, f"{remote_dir}/file.txt", "file.txt", 1)]
+
+        def fake_process_file(_self: MonitorService, _connection: FtpConnectionConfig, _file: RemoteFileInfo) -> tuple[bool, bool]:
+            return (False, False)
+
+        FtpClient.connect = fake_connect  # type: ignore[method-assign]
+        FtpClient.disconnect = fake_disconnect  # type: ignore[method-assign]
+        FtpClient.list_files = fake_list_files  # type: ignore[method-assign]
+        MonitorService.process_file = fake_process_file  # type: ignore[method-assign]
+        try:
+            detected, new_candidates, notified = service.process_connection(conn)
+        finally:
+            FtpClient.connect = original_connect  # type: ignore[method-assign]
+            FtpClient.disconnect = original_disconnect  # type: ignore[method-assign]
+            FtpClient.list_files = original_list_files  # type: ignore[method-assign]
+            MonitorService.process_file = original_process_file  # type: ignore[method-assign]
+
+        self.assertEqual((detected, new_candidates, notified), (2, 0, 0))
+        self.assertEqual(calls["connect"], 1)
+        self.assertEqual(calls["disconnect"], 1)
+        self.assertEqual(calls["list_dirs"], ["/to", "/from"])
+
+    def test_process_connection_continues_when_one_directory_fails(self):
+        general = GeneralConfig(connect_timeout=15)
+        conn = FtpConnectionConfig(
+            section_name="ftp_01",
+            enabled=True,
+            display_name="Sunrise FTP",
+            protocol="ftp",
+            host="real.host.local",
+            port=21,
+            username="u",
+            password="p",
+            remote_dirs=["/to", "/from"],
+        )
+        config = AppConfig(
+            general=general,
+            notification=NotificationConfig(mode="windows"),
+            mail=MailConfig(),
+            startup=StartupConfig(),
+            connections=[conn],
+            root_dir=Path("."),
+            db_path=Path("monitor.db"),
+        )
+        service = MonitorService(config, FakeDB(None), FakeNotificationService(True), logging.getLogger("test"))
+
+        original_connect = FtpClient.connect
+        original_disconnect = FtpClient.disconnect
+        original_list_files = FtpClient.list_files
+        original_process_file = MonitorService.process_file
+
+        def fake_connect(_self: FtpClient) -> None:
+            return None
+
+        def fake_disconnect(_self: FtpClient) -> None:
+            return None
+
+        def fake_list_files(_self: FtpClient, remote_dir: str, recursive: bool = False) -> list[RemoteFileInfo]:
+            if remote_dir == "/to":
+                raise RuntimeError("failed /to")
+            return [RemoteFileInfo("test", remote_dir, f"{remote_dir}/file.txt", "file.txt", 1)]
+
+        def fake_process_file(_self: MonitorService, _connection: FtpConnectionConfig, _file: RemoteFileInfo) -> tuple[bool, bool]:
+            return (False, False)
+
+        FtpClient.connect = fake_connect  # type: ignore[method-assign]
+        FtpClient.disconnect = fake_disconnect  # type: ignore[method-assign]
+        FtpClient.list_files = fake_list_files  # type: ignore[method-assign]
+        MonitorService.process_file = fake_process_file  # type: ignore[method-assign]
+        try:
+            with self.assertLogs("test", level="ERROR") as logs:
+                detected, new_candidates, notified = service.process_connection(conn)
+        finally:
+            FtpClient.connect = original_connect  # type: ignore[method-assign]
+            FtpClient.disconnect = original_disconnect  # type: ignore[method-assign]
+            FtpClient.list_files = original_list_files  # type: ignore[method-assign]
+            MonitorService.process_file = original_process_file  # type: ignore[method-assign]
+
+        self.assertEqual((detected, new_candidates, notified), (1, 0, 0))
+        self.assertIn("Failed scanning directory: /to", "\n".join(logs.output))
+
 
 if __name__ == "__main__":
     unittest.main()
