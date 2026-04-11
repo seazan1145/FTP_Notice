@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 import socket
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .db import MonitorDatabase
@@ -17,6 +20,15 @@ def _parse_iso(value: str | None) -> datetime:
     return datetime.fromisoformat(value)
 
 
+@dataclass(slots=True)
+class ConnectionRuntimeState:
+    is_connected: bool = False
+    consecutive_failures: int = 0
+    next_wait_seconds: int = 0
+    next_scan_at: float = 0.0
+    last_scan_started_at: float = 0.0
+
+
 class MonitorService:
     def __init__(self, config: AppConfig, db: MonitorDatabase, notifier: NotificationService, logger: logging.Logger) -> None:
         self.config = config
@@ -24,15 +36,34 @@ class MonitorService:
         self.notifier = notifier
         self.logger = logger
         self._first_scan_completed = False
+        self.manual_refresh_event = threading.Event()
+        self._runtime_states: dict[str, ConnectionRuntimeState] = {}
+        self._clients: dict[str, FtpClient] = {}
 
     def run_once(self) -> None:
+        self.run_pending_scans(force_all=True)
+
+    def request_manual_refresh(self) -> None:
+        self.logger.info("Manual refresh requested")
+        self.manual_refresh_event.set()
+
+    def run_pending_scans(self, force_all: bool = False) -> int:
         enabled = [c for c in self.config.connections if c.enabled]
+        now_monotonic = time.monotonic()
+        manual_requested = force_all or self.manual_refresh_event.is_set()
+        if manual_requested:
+            self.manual_refresh_event.clear()
         self.logger.info("Config loaded: %s connection(s), %s enabled.", len(self.config.connections), len(enabled))
         detected_count = 0
         new_candidate_count = 0
         notified_count = 0
         for connection in enabled:
-            conn_detected, conn_new, conn_notified = self.process_connection(connection)
+            state = self._runtime_states.setdefault(connection.section_name, ConnectionRuntimeState())
+            if not manual_requested and state.next_scan_at > now_monotonic:
+                continue
+            if manual_requested:
+                self.logger.info("Manual refresh started: %s", connection.display_name)
+            conn_detected, conn_new, conn_notified = self.process_connection(connection, state)
             detected_count += conn_detected
             new_candidate_count += conn_new
             notified_count += conn_notified
@@ -43,18 +74,35 @@ class MonitorService:
             notified_count,
         )
         self._first_scan_completed = True
+        waits = [
+            max(0, int(state.next_scan_at - time.monotonic()))
+            for state in self._runtime_states.values()
+            if state.next_scan_at > 0
+        ]
+        next_wait = min(waits) if waits else self.config.general.poll_interval_seconds
+        return max(0, next_wait)
 
-    def process_connection(self, connection: FtpConnectionConfig) -> tuple[int, int, int]:
-        client = FtpClient(connection, self.config.general, logger=self.logger)
+    def process_connection(self, connection: FtpConnectionConfig, state: ConnectionRuntimeState | None = None) -> tuple[int, int, int]:
+        if state is None:
+            state = self._runtime_states.setdefault(connection.section_name, ConnectionRuntimeState())
+        client = self._clients.get(connection.section_name)
+        if client is None or not self.config.general.keep_connection_alive:
+            client = FtpClient(connection, self.config.general, logger=self.logger)
+            if self.config.general.keep_connection_alive:
+                self._clients[connection.section_name] = client
         detected_count = 0
         new_candidate_count = 0
         notified_count = 0
+        state.last_scan_started_at = time.monotonic()
         try:
-            self.logger.info("Connecting: %s (%s:%s)", connection.display_name, connection.host, connection.port)
-            client.connect()
-            self.logger.info("Connected: %s", connection.display_name)
+            if not client.is_connected:
+                self.logger.info("Connecting: %s (%s:%s)", connection.display_name, connection.host, connection.port)
+            client.ensure_connected()
+            if not state.is_connected:
+                self.logger.info("Connected: %s", connection.display_name)
+            state.is_connected = True
             for remote_dir in connection.remote_dirs:
-                self.logger.info("Scanning: %s", remote_dir)
+                self.logger.info("Scanning: %s %s", connection.display_name, remote_dir)
                 try:
                     files = client.list_files(remote_dir, recursive=connection.recursive)
                     self.logger.info("Directory scan result: dir=%s detected=%s", remote_dir, len(files))
@@ -67,8 +115,16 @@ class MonitorService:
                             notified_count += 1
                 except FtpDataConnectionTlsError:
                     self.logger.exception("Failed scanning directory due to FTPS data connection TLS/session issue: %s", remote_dir)
+                    raise
                 except Exception:
                     self.logger.exception("Failed scanning directory: %s", remote_dir)
+                    raise
+            if state.consecutive_failures > 0:
+                self.logger.info("Scan recovered, resetting backoff: %s", connection.display_name)
+            state.consecutive_failures = 0
+            state.next_wait_seconds = self.config.general.poll_interval_seconds
+            state.next_scan_at = time.monotonic() + state.next_wait_seconds
+            self.logger.info("Waiting %ss before next scan: %s", state.next_wait_seconds, connection.display_name)
         except socket.gaierror as exc:
             self.logger.error("Host name could not be resolved: %s", connection.host)
             self.logger.error(
@@ -76,15 +132,45 @@ class MonitorService:
             )
             self.logger.info("DNS/name resolution error detail: %s", exc)
             self.logger.debug("Name resolution traceback", exc_info=True)
+            self._handle_failure(connection, client, state, "connect")
         except FtpConnectTimeoutError as exc:
             self.logger.error("Connection timeout: %s", connection.display_name)
             self.logger.error("%s", exc)
             self.logger.debug("Connection timeout traceback", exc_info=True)
+            self._handle_failure(connection, client, state, "connect")
         except Exception:
-            self.logger.exception("Connection failed: %s", connection.display_name)
+            if state.is_connected:
+                self.logger.exception("Scan failed: %s error=%s", connection.display_name, "connection_lost_or_scan_error")
+            else:
+                self.logger.exception("Connection failed: %s", connection.display_name)
+            self._handle_failure(connection, client, state, "scan")
         finally:
-            client.disconnect()
+            if not self.config.general.keep_connection_alive:
+                client.disconnect()
+                state.is_connected = False
         return (detected_count, new_candidate_count, notified_count)
+
+    def _handle_failure(self, connection: FtpConnectionConfig, client: FtpClient, state: ConnectionRuntimeState, phase: str) -> None:
+        state.consecutive_failures += 1
+        state.is_connected = False
+        if self.config.general.reconnect_on_error:
+            client.disconnect()
+            self.logger.warning("Connection lost, reconnecting: %s", connection.display_name)
+        state.next_wait_seconds = self._compute_next_wait_seconds(state.consecutive_failures)
+        state.next_scan_at = time.monotonic() + state.next_wait_seconds
+        self.logger.warning(
+            "Reconnect scheduled after %ss (failure_count=%s) [%s]",
+            state.next_wait_seconds,
+            state.consecutive_failures,
+            phase,
+        )
+
+    def _compute_next_wait_seconds(self, failure_count: int) -> int:
+        if not self.config.general.backoff_enabled:
+            return self.config.general.poll_interval_seconds
+        schedule = self.config.general.backoff_schedule_seconds
+        index = min(max(failure_count - 1, 0), len(schedule) - 1)
+        return schedule[index]
 
     def process_file(self, connection: FtpConnectionConfig, file_info: RemoteFileInfo) -> tuple[bool, bool]:
         if not self._matches_filters(connection, file_info):

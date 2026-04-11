@@ -107,6 +107,54 @@ remote_dirs = /in
         self.assertEqual(config.mail.from_address, "sender@gmail.com")
         self.assertEqual(config.mail.to_address, "receiver@example.com")
 
+    def test_general_new_poll_and_backoff_settings(self):
+        path = self._write(
+            """
+[general]
+poll_interval_seconds = 10
+keep_connection_alive = true
+backoff_enabled = true
+backoff_schedule_seconds = 10,20,30,60
+
+[notification]
+mode = windows
+
+[ftp_01]
+host = real.example.local
+username = u
+password = p
+protocol = ftp
+remote_dirs = /in
+""".strip()
+        )
+
+        config = load_config(path)
+        self.assertEqual(config.general.poll_interval_seconds, 10)
+        self.assertTrue(config.general.keep_connection_alive)
+        self.assertTrue(config.general.backoff_enabled)
+        self.assertEqual(config.general.backoff_schedule_seconds, [10, 20, 30, 60])
+
+    def test_poll_seconds_is_backward_compatible(self):
+        path = self._write(
+            """
+[general]
+poll_seconds = 77
+
+[notification]
+mode = windows
+
+[ftp_01]
+host = real.example.local
+username = u
+password = p
+protocol = ftp
+remote_dirs = /in
+""".strip()
+        )
+
+        config = load_config(path)
+        self.assertEqual(config.general.poll_interval_seconds, 77)
+
     def test_parse_remote_dirs_pipe_delimited(self):
         self.assertEqual(parse_remote_dirs("/a|/b"), ["/a", "/b"])
 

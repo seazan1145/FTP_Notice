@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import time
+import threading
 from pathlib import Path
 
 from .config_loader import DEFAULT_CONFIG_PATH, DEFAULT_SAMPLE_CONFIG_PATH, load_config
@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--once", action="store_true", help="Run one scan cycle and exit")
     parser.add_argument("--test-notify", action="store_true", help="Send a test notification and exit")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging for one-shot FTPS diagnostics")
+    parser.add_argument("--with-control-gui", action="store_true", help="Open a small control GUI with a manual refresh button")
     return parser.parse_args()
 
 
@@ -89,20 +90,28 @@ def main() -> int:
         return 1
 
     service = MonitorService(config, db, notifier, logger)
+    stop_event = threading.Event()
+    gui_thread: threading.Thread | None = None
 
     try:
+        if args.with_control_gui:
+            gui_thread = _start_control_gui(service, logger, stop_event)
         while True:
-            service.run_once()
+            wait_seconds = service.run_pending_scans()
             logger.info("Scan completed.")
             if args.once:
                 break
-            time.sleep(config.general.poll_seconds)
+            if wait_seconds > 0:
+                service.manual_refresh_event.wait(wait_seconds)
     except KeyboardInterrupt:
         logger.info("Application interrupted by user.")
     except Exception:
         logger.exception("Unhandled error in main loop")
         return 1
     finally:
+        stop_event.set()
+        if gui_thread and gui_thread.is_alive():
+            gui_thread.join(timeout=1.0)
         db.close()
         logger.info("Application stopped.")
 
@@ -124,6 +133,41 @@ def _ensure_runtime_config(config_path: Path) -> bool:
     print("Please edit config/ftp_monitor.ini and replace all sample values before rerunning.")
     print("Monitoring was not started.")
     return True
+
+
+def _start_control_gui(service: MonitorService, logger, stop_event: threading.Event) -> threading.Thread | None:
+    def _runner() -> None:
+        try:
+            import tkinter as tk
+        except Exception:
+            logger.warning("Control GUI could not start (tkinter unavailable).")
+            return
+
+        root = tk.Tk()
+        root.title("FTP Monitor Control")
+        root.geometry("280x100")
+
+        button = tk.Button(
+            root,
+            text="今すぐ更新",
+            command=service.request_manual_refresh,
+            padx=12,
+            pady=8,
+        )
+        button.pack(expand=True)
+
+        def _tick() -> None:
+            if stop_event.is_set():
+                root.destroy()
+                return
+            root.after(300, _tick)
+
+        root.after(300, _tick)
+        root.mainloop()
+
+    thread = threading.Thread(target=_runner, name="control-gui", daemon=True)
+    thread.start()
+    return thread
 
 
 if __name__ == "__main__":

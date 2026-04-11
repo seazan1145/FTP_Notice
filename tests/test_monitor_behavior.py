@@ -9,7 +9,7 @@ from pathlib import Path
 
 from app.ftp_client import FtpClient, FtpConnectTimeoutError
 from app.models import AppConfig, FtpConnectionConfig, GeneralConfig, MailConfig, NotificationConfig, RemoteFileInfo, StartupConfig
-from app.monitor import MonitorService
+from app.monitor import ConnectionRuntimeState, MonitorService
 
 
 class FakeFTPForFallback:
@@ -293,7 +293,7 @@ class MonitorServiceTests(unittest.TestCase):
         self.assertIn("Connection timeout: Sunrise FTP", output)
 
     def test_process_connection_scans_multiple_directories_with_single_connect(self):
-        general = GeneralConfig(connect_timeout=15)
+        general = GeneralConfig(connect_timeout=15, keep_connection_alive=False)
         conn = FtpConnectionConfig(
             section_name="ftp_01",
             enabled=True,
@@ -353,8 +353,8 @@ class MonitorServiceTests(unittest.TestCase):
         self.assertEqual(calls["disconnect"], 1)
         self.assertEqual(calls["list_dirs"], ["/to", "/from"])
 
-    def test_process_connection_continues_when_one_directory_fails(self):
-        general = GeneralConfig(connect_timeout=15)
+    def test_process_connection_marks_failure_when_one_directory_fails(self):
+        general = GeneralConfig(connect_timeout=15, keep_connection_alive=False)
         conn = FtpConnectionConfig(
             section_name="ftp_01",
             enabled=True,
@@ -409,8 +409,104 @@ class MonitorServiceTests(unittest.TestCase):
             FtpClient.list_files = original_list_files  # type: ignore[method-assign]
             MonitorService.process_file = original_process_file  # type: ignore[method-assign]
 
-        self.assertEqual((detected, new_candidates, notified), (1, 0, 0))
+        self.assertEqual((detected, new_candidates, notified), (0, 0, 0))
         self.assertIn("Failed scanning directory: /to", "\n".join(logs.output))
+
+    def test_keep_connection_alive_true_does_not_disconnect_after_success(self):
+        conn = self._build_config("windows").connections[0]
+        config = self._build_config("windows")
+        config.general.keep_connection_alive = True
+        service = MonitorService(config, FakeDB(None), FakeNotificationService(True), logging.getLogger("test"))
+
+        calls = {"disconnect": 0}
+        original_disconnect = FtpClient.disconnect
+        original_ensure_connected = FtpClient.ensure_connected
+        original_list_files = FtpClient.list_files
+
+        def fake_disconnect(_self: FtpClient) -> None:
+            calls["disconnect"] += 1
+
+        def fake_ensure_connected(_self: FtpClient) -> None:
+            return None
+
+        def fake_list_files(_self: FtpClient, remote_dir: str, recursive: bool = False) -> list[RemoteFileInfo]:
+            return []
+
+        FtpClient.disconnect = fake_disconnect  # type: ignore[method-assign]
+        FtpClient.ensure_connected = fake_ensure_connected  # type: ignore[method-assign]
+        FtpClient.list_files = fake_list_files  # type: ignore[method-assign]
+        try:
+            service.process_connection(conn)
+        finally:
+            FtpClient.disconnect = original_disconnect  # type: ignore[method-assign]
+            FtpClient.ensure_connected = original_ensure_connected  # type: ignore[method-assign]
+            FtpClient.list_files = original_list_files  # type: ignore[method-assign]
+
+        self.assertEqual(calls["disconnect"], 0)
+
+    def test_backoff_increases_and_resets_on_success(self):
+        config = self._build_config("windows")
+        config.general.backoff_enabled = True
+        config.general.backoff_schedule_seconds = [10, 20, 30, 60]
+        service = MonitorService(config, FakeDB(None), FakeNotificationService(True), logging.getLogger("test"))
+        conn = config.connections[0]
+        state = ConnectionRuntimeState()
+
+        original_ensure_connected = FtpClient.ensure_connected
+        original_list_files = FtpClient.list_files
+
+        def fake_ensure_connected(_self: FtpClient) -> None:
+            return None
+
+        def fail_list_files(_self: FtpClient, remote_dir: str, recursive: bool = False) -> list[RemoteFileInfo]:
+            raise RuntimeError("scan fail")
+
+        FtpClient.ensure_connected = fake_ensure_connected  # type: ignore[method-assign]
+        FtpClient.list_files = fail_list_files  # type: ignore[method-assign]
+        try:
+            service.process_connection(conn, state)
+            self.assertEqual(state.consecutive_failures, 1)
+            self.assertEqual(state.next_wait_seconds, 10)
+            service.process_connection(conn, state)
+            self.assertEqual(state.consecutive_failures, 2)
+            self.assertEqual(state.next_wait_seconds, 20)
+        finally:
+            FtpClient.ensure_connected = original_ensure_connected  # type: ignore[method-assign]
+            FtpClient.list_files = original_list_files  # type: ignore[method-assign]
+
+        def ok_list_files(_self: FtpClient, remote_dir: str, recursive: bool = False) -> list[RemoteFileInfo]:
+            return []
+
+        FtpClient.ensure_connected = fake_ensure_connected  # type: ignore[method-assign]
+        FtpClient.list_files = ok_list_files  # type: ignore[method-assign]
+        try:
+            service.process_connection(conn, state)
+        finally:
+            FtpClient.ensure_connected = original_ensure_connected  # type: ignore[method-assign]
+            FtpClient.list_files = original_list_files  # type: ignore[method-assign]
+
+        self.assertEqual(state.consecutive_failures, 0)
+        self.assertEqual(state.next_wait_seconds, config.general.poll_interval_seconds)
+
+    def test_manual_refresh_event_triggers_immediate_scan(self):
+        config = self._build_config("windows")
+        service = MonitorService(config, FakeDB(None), FakeNotificationService(True), logging.getLogger("test"))
+
+        calls = {"count": 0}
+        original_process_connection = MonitorService.process_connection
+
+        def fake_process_connection(_self: MonitorService, _connection: FtpConnectionConfig, state=None):  # type: ignore[no-untyped-def]
+            calls["count"] += 1
+            return (0, 0, 0)
+
+        MonitorService.process_connection = fake_process_connection  # type: ignore[method-assign]
+        try:
+            service.request_manual_refresh()
+            service.run_pending_scans()
+        finally:
+            MonitorService.process_connection = original_process_connection  # type: ignore[method-assign]
+
+        self.assertEqual(calls["count"], 1)
 
 
 if __name__ == "__main__":

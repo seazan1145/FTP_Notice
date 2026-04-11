@@ -93,6 +93,10 @@ class FtpClient:
         self.logger = logger or logging.getLogger(__name__)
         self.ftp: ftplib.FTP | ftplib.FTP_TLS | None = None
 
+    @property
+    def is_connected(self) -> bool:
+        return self.ftp is not None
+
     def connect(self) -> None:
         mode = self._connection_mode()
         if mode == "ftps-implicit":
@@ -137,6 +141,29 @@ class FtpClient:
         else:
             self.logger.debug("prot_p() skipped for mode=%s", mode)
         self.ftp = ftp
+
+    def maybe_noop(self) -> bool:
+        if self.ftp is None:
+            return False
+        try:
+            self.ftp.voidcmd("NOOP")
+            return True
+        except Exception:
+            try:
+                self.ftp.pwd()
+                return True
+            except Exception:
+                return False
+
+    def ensure_connected(self) -> None:
+        if self.ftp is None:
+            self.connect()
+            return
+        if self.maybe_noop():
+            return
+        self.logger.warning("Connection health check failed. Reconnecting: %s", self.config.display_name)
+        self.disconnect()
+        self.connect()
 
     def _connection_mode(self) -> str:
         return self.config.protocol.lower().strip()

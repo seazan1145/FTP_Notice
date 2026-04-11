@@ -32,10 +32,15 @@ class StartupConfig:
 @dataclass(slots=True)
 class GeneralConfig:
     poll_seconds: int = 60
+    poll_interval_seconds: int = 60
     stable_seconds: int = 30
     connect_timeout: int = 15
     read_timeout: int = 30
     passive_mode: bool = True
+    reconnect_on_error: bool = True
+    keep_connection_alive: bool = True
+    backoff_enabled: bool = True
+    backoff_schedule_seconds: list[int] = field(default_factory=lambda: [10, 20, 30, 60])
     log_level: str = "INFO"
     mail_module_path: str = "mail.py"
 
