@@ -96,12 +96,27 @@ def _parse_positive_int(raw: str, field_name: str, minimum: int = 1) -> int:
 
 def _load_general(parser: configparser.ConfigParser) -> GeneralConfig:
     section = parser["general"] if parser.has_section("general") else {}
+    poll_interval_raw = section.get("poll_interval_seconds", section.get("poll_seconds", "60"))
+    poll_interval_seconds = _parse_positive_int(poll_interval_raw, "general.poll_interval_seconds")
+    backoff_schedule_raw = section.get("backoff_schedule_seconds", "10,20,30,60")
+    backoff_schedule_seconds = [
+        _parse_positive_int(chunk.strip(), "general.backoff_schedule_seconds")
+        for chunk in backoff_schedule_raw.split(",")
+        if chunk.strip()
+    ]
+    if not backoff_schedule_seconds:
+        raise ValueError("Invalid general.backoff_schedule_seconds: at least one value is required")
     return GeneralConfig(
-        poll_seconds=_parse_positive_int(section.get("poll_seconds", "60"), "general.poll_seconds"),
+        poll_seconds=poll_interval_seconds,
+        poll_interval_seconds=poll_interval_seconds,
         stable_seconds=_parse_positive_int(section.get("stable_seconds", "30"), "general.stable_seconds"),
         connect_timeout=_parse_positive_int(section.get("connect_timeout", "15"), "general.connect_timeout"),
         read_timeout=_parse_positive_int(section.get("read_timeout", "30"), "general.read_timeout"),
         passive_mode=parse_bool(section.get("passive_mode", "true"), True),
+        reconnect_on_error=parse_bool(section.get("reconnect_on_error", "true"), True),
+        keep_connection_alive=parse_bool(section.get("keep_connection_alive", "true"), True),
+        backoff_enabled=parse_bool(section.get("backoff_enabled", "true"), True),
+        backoff_schedule_seconds=backoff_schedule_seconds,
         log_level=section.get("log_level", "INFO"),
         mail_module_path=section.get("mail_module_path", "mail.py").strip() or "mail.py",
     )

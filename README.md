@@ -11,8 +11,12 @@ FTP/FTPS 監視ツールです。`stable_seconds` 経過後に通知し、SQLite
 ## INI 構成
 ```ini
 [general]
-poll_seconds = 60
+poll_interval_seconds = 10
 stable_seconds = 30
+reconnect_on_error = true
+keep_connection_alive = true
+backoff_enabled = true
+backoff_schedule_seconds = 10,20,30,60
 mail_module_path = mail.py
 
 [notification]
@@ -50,6 +54,20 @@ notify_existing_on_start = false
 ## 起動時既存ファイルの扱い
 - `startup.notify_existing_on_start = false`: 起動前から存在するファイルは取り込みのみ（通知なし）
 - `startup.notify_existing_on_start = true`: 起動後の安定化判定で通知対象にできる
+
+## 監視ループの新仕様
+- 接続維持モード（`keep_connection_alive = true`）では接続を維持し、`poll_interval_seconds` ごとに繰り返しスキャンします。
+- 接続/スキャンでエラー発生時は `reconnect_on_error = true` なら切断後に再接続します。
+- `backoff_enabled = true` の場合、連続失敗回数に応じて `backoff_schedule_seconds` の待機秒数へ自動移行します。
+- 成功スキャン時は連続失敗回数をリセットし、通常の `poll_interval_seconds` に戻ります。
+- 互換性: `poll_seconds` は引き続き読み込み可能ですが、`poll_interval_seconds` を優先します。
+
+## 手動更新（GUI）
+- `python -m app.main --with-control-gui` で簡易コントロール GUI を開けます。
+- 「今すぐ更新」ボタン押下で待機を中断し、全接続の即時スキャンを開始します。
+- ログ:
+  - `Manual refresh requested`
+  - `Manual refresh started: <connection>`
 
 ## 通知仕様
 - 同一 `remote_path` でも `size` または `modified_at` が変化したら更新として再アーム。
