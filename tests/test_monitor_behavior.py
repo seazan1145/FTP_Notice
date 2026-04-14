@@ -42,6 +42,36 @@ class FtpClientFallbackTests(unittest.TestCase):
         self.assertEqual(files[0].file_name, "file one.txt")
         self.assertEqual(files[0].file_size, 123)
 
+    def test_mlsd_single_dir_includes_folder_entries(self):
+        class FakeFTP:
+            def mlsd(self, _target_dir: str):
+                return iter(
+                    [
+                        ("A001.zip", {"type": "file", "size": "123"}),
+                        ("素材一式", {"type": "dir"}),
+                    ]
+                )
+
+        config = FtpConnectionConfig(
+            section_name="ftp_01",
+            enabled=True,
+            display_name="test",
+            protocol="ftp",
+            host="example.com",
+            port=21,
+            username="u",
+            password="p",
+            remote_dirs=["/upload"],
+        )
+        client = FtpClient(config, GeneralConfig(), logger=logging.getLogger("test"))
+        client.ftp = FakeFTP()
+
+        entries = list(client.list_files("/upload", recursive=False))
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].entry_type, "file")
+        self.assertEqual(entries[1].entry_type, "folder")
+
 
 class FakeDB:
     def __init__(self, row: dict | None):
@@ -49,12 +79,14 @@ class FakeDB:
         self.marked = False
         self.updated: list[tuple] = []
         self.inserted = False
+        self.insert_payload: dict | None = None
 
     def get_observed_file(self, connection_name: str, remote_path: str):
         return self.row
 
     def insert_candidate(self, payload: dict):
         self.inserted = True
+        self.insert_payload = payload
 
     def update_seen(self, record_id: int, file_size: int, modified_at: str | None, **kwargs):
         self.updated.append((record_id, file_size, modified_at, kwargs))
@@ -226,8 +258,38 @@ class MonitorServiceTests(unittest.TestCase):
 
         self.assertTrue(notified)
         payload = notifier.calls[0]
+        self.assertEqual(payload["type"], "file")
         self.assertEqual(payload["lastModified"], "2026-03-18T11:02:27+00:00")
         self.assertEqual(payload["hashKey"], "/upload/file.txt_100_2026-03-18T11:02:27+00:00")
+
+    def test_new_folder_candidate_inserts_with_folder_type(self):
+        db = FakeDB(None)
+        notifier = FakeNotificationService(True)
+        service = MonitorService(self._build_config("mail"), db, notifier, logging.getLogger("test"))
+        conn = service.config.connections[0]
+        info = RemoteFileInfo("test", "/upload", "/upload/素材一式", "素材一式", 0, entry_type="folder")
+
+        is_new, notified = service.process_file(conn, info)
+
+        self.assertTrue(is_new)
+        self.assertFalse(notified)
+        self.assertEqual(db.insert_payload["entry_type"], "folder")
+
+    def test_folder_notified_without_stability_wait(self):
+        now = datetime.now(timezone.utc)
+        row = {"id": 1, "file_size": 0, "modified_at": None, "is_notified": 0, "last_size_change_at": (now - timedelta(seconds=1)).isoformat()}
+        db = FakeDB(row)
+        notifier = FakeNotificationService(True)
+        service = MonitorService(self._build_config("mail"), db, notifier, logging.getLogger("test"))
+
+        _, notified = service.process_file(
+            service.config.connections[0],
+            RemoteFileInfo("test", "/upload", "/upload/作監素材", "作監素材", 0, entry_type="folder"),
+        )
+
+        self.assertTrue(notified)
+        self.assertTrue(db.marked)
+        self.assertEqual(notifier.calls[0]["type"], "folder")
 
     def test_invalid_modified_at_fallback_does_not_break_notification(self):
         now = datetime.now(timezone.utc)

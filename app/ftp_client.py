@@ -208,6 +208,7 @@ class FtpClient:
                         file_name=name,
                         file_size=size,
                         modified_at=facts.get("modify"),
+                        entry_type="file",
                     )
                 else:
                     self.logger.debug("Skipping MLSD entry with unsupported type: path=%s type=%s", path, item_type)
@@ -229,6 +230,7 @@ class FtpClient:
                         remote_path=path,
                         file_name=name,
                         file_size=size,
+                        entry_type="file",
                     )
         except FtpDataConnectionTlsError:
             if mlsd_tls_issue:
@@ -244,17 +246,19 @@ class FtpClient:
         if success:
             self.logger.debug("MLSD succeeded: dir=%s entries=%s", target_dir, len(entries))
             for name, facts in entries:
-                if facts.get("type") != "file":
-                    self.logger.debug("Skipping MLSD non-file entry: dir=%s name=%s type=%s", target_dir, name, facts.get("type"))
-                    continue
+                item_type = facts.get("type", "")
                 path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
+                if item_type not in {"file", "dir"}:
+                    self.logger.debug("Skipping MLSD unsupported entry: dir=%s name=%s type=%s", target_dir, name, item_type)
+                    continue
                 yield RemoteFileInfo(
                     connection_name=self.config.display_name,
                     remote_dir=root_dir,
                     remote_path=path,
                     file_name=name,
-                    file_size=int(facts.get("size", 0)),
+                    file_size=int(facts.get("size", 0)) if item_type == "file" else 0,
                     modified_at=facts.get("modify"),
+                    entry_type="folder" if item_type == "dir" else "file",
                 )
             return
 
@@ -264,16 +268,14 @@ class FtpClient:
         try:
             for row in self._list_via_list(target_dir):
                 name, size, is_dir = row
-                if is_dir:
-                    self.logger.debug("Skipping LIST directory entry in single-dir mode: %s/%s", target_dir, name)
-                    continue
                 path = f"{target_dir.rstrip('/')}/{name}" if target_dir != "/" else f"/{name}"
                 yield RemoteFileInfo(
                     connection_name=self.config.display_name,
                     remote_dir=root_dir,
                     remote_path=path,
                     file_name=name,
-                    file_size=size,
+                    file_size=0 if is_dir else size,
+                    entry_type="folder" if is_dir else "file",
                 )
         except FtpDataConnectionTlsError:
             if mlsd_tls_issue:

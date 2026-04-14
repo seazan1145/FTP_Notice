@@ -184,14 +184,37 @@ class MonitorService:
                     "remote_dir": file_info.remote_dir,
                     "remote_path": file_info.remote_path,
                     "file_name": file_info.file_name,
+                    "entry_type": file_info.entry_type,
                     "file_size": file_info.file_size,
                     "modified_at": file_info.modified_at,
                 }
             )
-            self.logger.info("Candidate inserted: path=%s size=%s", file_info.remote_path, file_info.file_size)
+            if file_info.entry_type == "folder":
+                self.logger.info("新規フォルダを検出: %s", file_info.file_name)
+                self.logger.info("Candidate inserted: type=folder path=%s", file_info.remote_path)
+            else:
+                self.logger.info("Candidate inserted: type=file path=%s size=%s", file_info.remote_path, file_info.file_size)
             if not self.config.startup.notify_existing_on_start and not self._first_scan_completed:
-                self.logger.info("Startup existing file registered without notification: path=%s", file_info.remote_path)
+                self.logger.info(
+                    "Startup existing entry registered without notification: path=%s type=%s",
+                    file_info.remote_path,
+                    file_info.entry_type,
+                )
             return (True, False)
+
+        if file_info.entry_type == "folder":
+            if int(row["is_notified"]) == 1:
+                self.logger.info("Skip already notified folder: path=%s", file_info.remote_path)
+                return (False, False)
+            self.logger.info("New folder notification dispatch: path=%s", file_info.remote_path)
+            payload = self._build_notice_payload(file_info)
+            ok = self.notifier.send_update(connection.display_name, file_info, payload)
+            if ok:
+                self.db.mark_notified(int(row["id"]))
+                self.logger.info("Marked notified: path=%s type=folder", file_info.remote_path)
+                return (False, True)
+            self.logger.error("Folder notification failed, mark_notified skipped: path=%s", file_info.remote_path)
+            return (False, False)
 
         old_size = int(row["file_size"] or 0)
         old_modified_at = row["modified_at"]
@@ -292,6 +315,7 @@ class MonitorService:
             "path": file_info.remote_path,
             "fileName": file_info.file_name,
             "folder": file_info.remote_dir,
+            "type": file_info.entry_type,
             "lastModified": normalized_last_modified,
             "size": file_info.file_size,
             "status": "updated",
@@ -305,6 +329,9 @@ class MonitorService:
             if token.lower() in lower_name:
                 self.logger.info("Skip by filter: path=%s reason=exclude_name_contains:%s", file_info.remote_path, token)
                 return False
+
+        if file_info.entry_type == "folder":
+            return True
 
         ext = lower_name.rsplit(".", 1)[-1] if "." in lower_name else ""
         if connection.include_extensions and ext not in connection.include_extensions:
