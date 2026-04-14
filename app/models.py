@@ -83,3 +83,4 @@ class RemoteFileInfo:
     file_name: str
     file_size: int
     modified_at: Optional[str] = None
+    entry_type: str = "file"

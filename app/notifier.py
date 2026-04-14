@@ -119,14 +119,15 @@ class NotificationService:
 
     def send_update(self, connection_name: str, file_info: RemoteFileInfo, payload: dict) -> bool:
         mode = self.notification.mode
+        label = "新規フォルダ" if file_info.entry_type == "folder" else "FTP新着ファイル"
         win_message = f"[{connection_name}]\n{file_info.remote_dir}\n{file_info.file_name}"
 
         if mode == "windows":
-            return self.windows_notifier.send_windows_notification("FTP新着ファイル", win_message)
+            return self.windows_notifier.send_windows_notification(label, win_message)
         if mode == "mail":
             return self.mail_notifier.send_update(payload)
         if mode == "both":
-            win_ok = self.windows_notifier.send_windows_notification("FTP新着ファイル", win_message)
+            win_ok = self.windows_notifier.send_windows_notification(label, win_message)
             mail_ok = self.mail_notifier.send_update(payload)
             both_ok = win_ok and mail_ok
             if not both_ok:

@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS observed_files (
     remote_dir TEXT NOT NULL,
     remote_path TEXT NOT NULL,
     file_name TEXT NOT NULL,
+    entry_type TEXT NOT NULL DEFAULT 'file',
     file_size INTEGER,
     modified_at TEXT,
     first_seen_at TEXT NOT NULL,
@@ -43,6 +44,10 @@ class MonitorDatabase:
             self._conn.execute("ALTER TABLE observed_files ADD COLUMN modified_at TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            self._conn.execute("ALTER TABLE observed_files ADD COLUMN entry_type TEXT NOT NULL DEFAULT 'file'")
+        except sqlite3.OperationalError:
+            pass
         self._conn.commit()
 
     def get_observed_file(self, connection_name: str, remote_path: str) -> sqlite3.Row | None:
@@ -58,9 +63,10 @@ class MonitorDatabase:
             """
             INSERT INTO observed_files (
                 connection_name, remote_dir, remote_path, file_name, file_size, modified_at,
+                entry_type,
                 first_seen_at, last_seen_at, last_size_change_at,
                 is_stable, is_notified, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?)
             """,
             (
                 payload["connection_name"],
@@ -69,6 +75,7 @@ class MonitorDatabase:
                 payload["file_name"],
                 payload["file_size"],
                 payload.get("modified_at"),
+                payload.get("entry_type", "file"),
                 now,
                 now,
                 now,
